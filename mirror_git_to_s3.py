@@ -4,7 +4,7 @@ from struct import unpack
 
 import httpx
 
-def streaming_mirror(base_url):
+def mirror_repos(base_url):
 
     def next_or_truncated_error(it):
         try:
