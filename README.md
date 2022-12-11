@@ -30,7 +30,7 @@ def mappings():
 mirror_repos(mappings())
 ```
 
-To mirror repositories from the the command line pairs of `--source` `--target` options can be passed to `mirror-git-to-s3`
+To mirror repositories from the the command line pairs of `--source` `--target` options can be passed to `mirror-git-to-s3`.
 
 ```bash
 mirror-git-to-s3 \
