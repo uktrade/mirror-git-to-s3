@@ -38,4 +38,4 @@ mirror-git-to-s3 \
 	--source 'https://example.test/my-second-repo' --target 's3://my-bucket/my-second-repo'
 ```
 
-At the time of writing, there is no known standard way of discovering a set of associated git repositories, hence this project must be told each the source and target address of each repository explicitly.
+At the time of writing, there is no known standard way of discovering a set of associated git repositories, hence to remain general, this project must be told the source and target addresses of each repository explicitly.
