@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mirror-git-to-s3"
+version = "0.0.0"
+authors = [
+  { name="Department for International Trade", email="sre@digital.trade.gov.uk" },
+]
+description = "Python functions and CLI to mirror git repositories available on HTTP(S) to S3"
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = [
+    "boto3>=1.26.27",
+    "httpx>=0.23.1",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/uktrade/mirror-git-to-s3"
+"Bug Tracker" = "https://github.com/uktrade/mirror-git-to-s3/issues"
