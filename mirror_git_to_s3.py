@@ -5,7 +5,7 @@ from struct import unpack
 import httpx
 
 
-def mirror_repos(base_url):
+def mirror_repos(base_url, get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3))):
 
     def next_or_truncated_error(it):
         try:
@@ -90,7 +90,7 @@ def mirror_repos(base_url):
 
         return length
 
-    with httpx.Client(transport=httpx.HTTPTransport(retries=3)) as http_client:
+    with get_http_client() as http_client:
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
 
