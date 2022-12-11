@@ -30,6 +30,24 @@ def mappings():
 mirror_repos(mappings())
 ```
 
+Under the hood, boto3 is used to communicate with S3. The boto3 client is constructed automatically, but you can override the default by using the `get_s3_client` argument.
+
+```python
+import boto3
+from mirror_git_to_s3 import mirror_repos
+
+mirror_repos(mappings(), get_s3_client=lambda: boto3.client('s3'))
+```
+
+This can be used to mirror to S3-compatible storage.
+
+```python
+import boto3
+from mirror_git_to_s3 import mirror_repos
+
+mirror_repos(mappings(), get_s3_client=lambda: boto3.client('s3', endpoint_url='http://my-host.com/'))
+```
+
 To mirror repositories from the the command line pairs of `--source` `--target` options can be passed to `mirror-git-to-s3`.
 
 ```bash
