@@ -22,6 +22,11 @@ dependencies = [
     "httpx>=0.23.1",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.2.0",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/uktrade/mirror-git-to-s3"
 "Bug Tracker" = "https://github.com/uktrade/mirror-git-to-s3/issues"
