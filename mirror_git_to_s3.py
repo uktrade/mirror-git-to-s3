@@ -90,7 +90,21 @@ def mirror_repos(base_url, get_http_client=lambda: httpx.Client(transport=httpx.
 
         return length
 
-    with get_http_client() as http_client:
+    def yield_with_asserted_length(bytes_iter, expected_length):
+        length = 0
+        for chunk in bytes_iter:
+            length += len(chunk)
+            yield chunk
+        assert length == expected_length
+
+    def get_pack_objects(http_client):
+        types_names = {
+            1: b'commit',
+            2: b'tree',
+            3: b'blob',
+            4: b'tag',
+        }
+
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
 
@@ -125,50 +139,24 @@ def mirror_repos(base_url, get_http_client=lambda: httpx.Client(transport=httpx.
                 assert object_type in (1, 2, 3, 4, 6, 7)
 
                 if object_type in (1, 2, 3, 4):
-
-                    types_names = {
-                        1: b'commit',
-                        2: b'tree',
-                        3: b'blob',
-                        4: b'tag',
-                    }
-
-                    object_bytes = b''.join(uncompress_zlib(read_indefinite, return_unused))
-                    sha = sha1(types_names[object_type] + b' ' + str(len(object_bytes)).encode() + b'\x00' + object_bytes).digest()
-                    got_object_names[sha] = object_type
-                    # if object_type == 4:
-                    #     print('BASE', object_type, object_bytes[0:100])
-                    #     print('SHA', object_type, sha)
-                    assert len(object_bytes) == object_length
+                    yield object_type, object_length, None, None, yield_with_asserted_length(uncompress_zlib(read_indefinite, return_unused), object_length)
 
                 elif object_type == 6:  # OBJ_OFS_DELTA
-                    length = get_length(read_bytes)
-                    object_bytes = b''.join(uncompress_zlib(read_indefinite, return_unused))
-                    assert len(object_bytes) == length
+                    offset = get_length(read_bytes)
+                    yield object_type, object_length, offset, None, yield_with_asserted_length(uncompress_zlib(read_indefinite, return_unused), object_length)
 
                 else:  # OBJ_REF_DELTA
                     object_name = read_bytes(20)
-                    # print("NAME", object_name)
                     needed_object_names.add(object_name)
-                    object_bytes = b''.join(uncompress_zlib(read_indefinite, return_unused))
-                    assert len(object_bytes) == object_length
+                    yield object_type, object_length, None, object_name, yield_with_asserted_length(uncompress_zlib(read_indefinite, return_unused), object_length)
 
             trailer = read_bytes(20)
 
-        print(len(needed_object_names), len(got_object_names))
-        print('got types')
-        for n in needed_object_names:
-            if n in got_object_names:
-                print('got', got_object_names[n])
-        # print('Needed and not got', needed_object_names - got_object_names)
+    with get_http_client() as http_client:
+        for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client):
+            print(object_type)
+            for _ in object_bytes:
+                pass
+            #sha = sha1(types_names[object_type] + b' ' + str(len(object_bytes)).encode() + b'\x00' + object_bytes).digest()
 
-        # pack_file_request = b''.join(
-        #     b'0032want ' + sha.hex().encode() + b'\n'
-        #     for sha in (needed_object_names - got_object_names)
-        # ) + b'0000' + b'0009done\n'
-
-        # with http_client.stream('POST', f'{base_url}/git-upload-pack', content=pack_file_request) as response:
-        #     r.raise_for_status()
-        #     print(r.content)
-
-        print('End')
+    print('End')
