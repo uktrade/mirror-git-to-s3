@@ -18,7 +18,7 @@ mirror_repos((
 ))
 ```
 
-In the previous example the iterable is itself a tuple. However in general any iterable is supported, and under the hood repositories are processed in parallel.
+In the previous example the iterable is itself a tuple. However in general any iterable is supported, Under the hood repositories are processed in parallel, and transfers can start before the entire list is known.
 
 ```python
 from mirror_git_to_s3 import mirror_repos
