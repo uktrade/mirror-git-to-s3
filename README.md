@@ -5,6 +5,13 @@ Python functions and CLI to mirror git repositories available on HTTP(S) to S3. 
 > Work in progress. This README serves as a rough design spec.
 
 
+## Installation
+
+```bash
+pip install mirror-git-to-s3
+```
+
+
 ## Usage
 
 To mirror one or more repositories from Python, use the `mirror_repos` function, passing it an iterable of (source, target) mappings.
