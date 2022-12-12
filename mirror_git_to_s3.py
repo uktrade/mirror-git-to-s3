@@ -98,13 +98,6 @@ def mirror_repos(base_url, get_http_client=lambda: httpx.Client(transport=httpx.
         assert length == expected_length
 
     def get_pack_objects(http_client):
-        types_names = {
-            1: b'commit',
-            2: b'tree',
-            3: b'blob',
-            4: b'tag',
-        }
-
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
 
@@ -152,11 +145,19 @@ def mirror_repos(base_url, get_http_client=lambda: httpx.Client(transport=httpx.
 
             trailer = read_bytes(20)
 
+    types_names_for_hash = {
+        1: b'commit',
+        2: b'tree',
+        3: b'blob',
+        4: b'tag',
+        6: b'',  # delta - hash not calculated
+        7: b'',  # delta - hash not calculated
+    }
+
     with get_http_client() as http_client:
         for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client):
-            print(object_type)
-            for _ in object_bytes:
-                pass
-            #sha = sha1(types_names[object_type] + b' ' + str(len(object_bytes)).encode() + b'\x00' + object_bytes).digest()
+            sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
+            for chunk in object_bytes:
+                sha.update(chunk)
 
     print('End')
