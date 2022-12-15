@@ -22,5 +22,9 @@ jobs:
           python-version: "${{ matrix.python-version }}"
       - name: "Install dependencies"
         run: "pip install '.[dev]'"
+      - name: "Start minio"
+        run: ./start-services.sh
+      - name: "Wait for minio"
+        run: "timeout 60 bash -c 'until echo > /dev/tcp/127.0.0.1/9000; do sleep 5; done'"
       - name: "Run tests"
         run: "pytest"

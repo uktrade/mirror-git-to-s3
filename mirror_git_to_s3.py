@@ -1,11 +1,16 @@
 import zlib
+import urllib.parse
 from hashlib import sha1
 from struct import unpack
 
+import boto3
 import httpx
 
 
-def mirror_repos(mappings, get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3))):
+def mirror_repos(mappings,
+        get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3)),
+        get_s3_client=lambda: boto3.client('s3'),
+    ):
 
     def next_or_truncated_error(it):
         try:
@@ -62,6 +67,36 @@ def mirror_repos(mappings, get_http_client=lambda: httpx.Client(transport=httpx.
             if dobj.eof:
                 return_unused(len(dobj.unused_data))
                 break
+
+    def to_filelike_obj(iterable):
+        chunk = b''
+        offset = 0
+        it = iter(iterable)
+
+        def up_to_iter(num):
+            nonlocal chunk, offset
+
+            while num:
+                if offset == len(chunk):
+                    try:
+                        chunk = next(it)
+                    except StopIteration:
+                        break
+                    else:
+                        offset = 0
+                to_yield = min(num, len(chunk) - offset)
+                offset = offset + to_yield
+                num -= to_yield
+                yield chunk[offset - to_yield:offset]
+
+        class FileLikeObj:
+            def read(self, n=-1):
+                n = \
+                    n if n != -1 else \
+                    float('infinity')
+                return b''.join(up_to_iter(n))
+
+        return FileLikeObj()
 
     def get_object_type_and_length(read_bytes):
         b = read_bytes(1)[0]
@@ -154,11 +189,22 @@ def mirror_repos(mappings, get_http_client=lambda: httpx.Client(transport=httpx.
         7: b'',  # delta - hash not calculated
     }
 
+    s3_client = get_s3_client()
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
+            parsed_target = urllib.parse.urlparse(target)
+            assert parsed_target.scheme == 's3'
+            bucket = parsed_target.netloc
+            target_prefix = parsed_target.path[1:] # Remove leading /
+
             for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client, source_base_url):
                 sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
-                for chunk in object_bytes:
-                    sha.update(chunk)
+
+                def with_sha():
+                    for chunk in object_bytes:
+                        sha.update(chunk)
+                        yield chunk
+
+                s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=target_prefix + '/something')
 
     print('End')
