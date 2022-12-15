@@ -200,11 +200,18 @@ def mirror_repos(mappings,
             for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client, source_base_url):
                 sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
 
+                temp_file_name =  f'{target_prefix}/mirror_tmp/1'
                 def with_sha():
                     for chunk in object_bytes:
                         sha.update(chunk)
                         yield chunk
+                sha_hex = sha.hexdigest()
 
-                s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=target_prefix + '/something')
+                s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=temp_file_name)
+                response = s3_client.copy(CopySource={
+                    'Bucket': bucket,
+                    'Key': temp_file_name,
+                }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+                s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
 
     print('End')
