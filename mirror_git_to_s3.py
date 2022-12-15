@@ -197,6 +197,15 @@ def mirror_repos(mappings,
             bucket = parsed_target.netloc
             target_prefix = parsed_target.path[1:] # Remove leading /
 
+            paginator = s3_client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=bucket, Prefix=f'{target_prefix}/mirror_tmp/'):
+                items = [
+                    {'Key': item['Key']}
+                    for item in page.get('Contents', [])
+                ]
+                if items:
+                    s3_client.delete_objects(Bucket=bucket, Delete={'Objects': items})
+
             for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client, source_base_url):
                 sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
 
