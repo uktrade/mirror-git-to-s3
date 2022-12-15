@@ -217,10 +217,12 @@ def mirror_repos(mappings,
                 sha_hex = sha.hexdigest()
 
                 s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=temp_file_name)
-                response = s3_client.copy(CopySource={
-                    'Bucket': bucket,
-                    'Key': temp_file_name,
-                }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
-                s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
+                try:
+                    response = s3_client.copy(CopySource={
+                        'Bucket': bucket,
+                        'Key': temp_file_name,
+                    }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+                finally:
+                    s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
 
     print('End')
