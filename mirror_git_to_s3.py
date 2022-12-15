@@ -5,7 +5,7 @@ from struct import unpack
 import httpx
 
 
-def mirror_repos(base_url, get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3))):
+def mirror_repos(mappings, get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3))):
 
     def next_or_truncated_error(it):
         try:
@@ -155,9 +155,10 @@ def mirror_repos(base_url, get_http_client=lambda: httpx.Client(transport=httpx.
     }
 
     with get_http_client() as http_client:
-        for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client, base_url):
-            sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
-            for chunk in object_bytes:
-                sha.update(chunk)
+        for source_base_url, target in mappings:
+            for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client, source_base_url):
+                sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
+                for chunk in object_bytes:
+                    sha.update(chunk)
 
     print('End')
