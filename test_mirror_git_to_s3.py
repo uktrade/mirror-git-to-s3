@@ -17,5 +17,5 @@ def test():
 
 	mirror_repos((
 		('https://github.com/uktrade/mirror-git-to-s3.git', f's3://{bucket_name}/mirror-git-to-s3'),
-		('https://github.com/uktrade/data-workspace.git',  f's3://{bucket_name}/data-workspace'),
+		# ('https://github.com/uktrade/data-workspace.git',  f's3://{bucket_name}/data-workspace'),
 	), get_s3_client=lambda: s3_client)

@@ -1,7 +1,9 @@
 import zlib
 import urllib.parse
 from hashlib import sha1
+from queue import SimpleQueue
 from struct import unpack
+from threading import Lock, Event, Thread
 
 import boto3
 import httpx
@@ -39,8 +41,8 @@ def mirror_repos(mappings,
                 num_bytes -= to_yield
                 yield chunk[offset - to_yield:offset]
 
-        def read_indefinite():
-            yield from _read(float('infinity'))
+        def yield_indefinite(num_bytes=float('infinity')):
+            yield from _read(num_bytes)
 
         def read_bytes(num_bytes):
             return b''.join(_read(num_bytes))
@@ -49,7 +51,63 @@ def mirror_repos(mappings,
             nonlocal offset
             offset -= num_unused
 
-        return read_indefinite, read_bytes, return_unused
+        return yield_indefinite, read_bytes, return_unused
+
+    def smooth(bytes_iter, interval=1.0):
+        # Due to deltas, our streaming processing can have large sections when we don't
+        # fetch any data, and the remote can think we have gone away. To avoid, we make
+        # sure to pull every interval
+        it = iter(bytes_iter)
+        thread_exception = None
+        get_from_thread_exception = None
+        fetch_next = Event()
+        queue = SimpleQueue()
+        lock = Lock()
+        amount_in_queue = 0
+
+        def pull():
+            nonlocal amount_in_queue, fetch_next, thread_exception
+
+            try:
+                while True:
+                    regular = fetch_next.wait(timeout=interval)
+                    fetch_next.clear()
+                    try:
+                        chunk = next(it)
+                    except StopIteration:
+                        break
+                    len_chunk = len(chunk)
+                    with lock:
+                        amount_in_queue += len_chunk
+                        to_report = amount_in_queue  # To not print when holding the lock
+                    if not regular:
+                        print('Forced fetch to avoid HTTP timeout on server. In queue:', to_report)
+                    queue.put(chunk)
+                    chunk = None
+            except Exception as e:
+                thread_exception = e
+
+        t = Thread(target=pull)
+        t.start()
+
+        try:
+            fetch_next.set()
+            while chunk := queue.get(timeout=60):
+                len_chunk = len(chunk)
+                with lock:
+                    amount_in_queue -= len_chunk
+                if queue.empty():
+                    fetch_next.set()
+                yield chunk
+                chunk = None
+            t.join(timeout=60)
+        except Exception as e:
+            get_from_thread_exception = e
+
+        if thread_exception is not None:
+            raise thread_exception
+        elif get_from_thread_exception is not None:
+            raise get_from_thread_exception
 
     def uncompress_zlib(read_indefinite, return_unused):
         dobj = zlib.decompressobj()
@@ -149,7 +207,7 @@ def mirror_repos(mappings,
         needed_object_names = set()
         with http_client.stream('POST', f'{base_url}/git-upload-pack', content=pack_file_request) as response:
             r.raise_for_status()
-            read_indefinite, read_bytes, return_unused = get_reader(response.iter_bytes())
+            yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
 
             length = int(read_bytes(4), 16)
             chunk = read_bytes(length - 4)
@@ -167,16 +225,16 @@ def mirror_repos(mappings,
                 assert object_type in (1, 2, 3, 4, 6, 7)
 
                 if object_type in (1, 2, 3, 4):
-                    yield object_type, object_length, None, None, yield_with_asserted_length(uncompress_zlib(read_indefinite, return_unused), object_length)
+                    yield object_type, object_length, None, None, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
 
                 elif object_type == 6:  # OBJ_OFS_DELTA
                     offset = get_length(read_bytes)
-                    yield object_type, object_length, offset, None, yield_with_asserted_length(uncompress_zlib(read_indefinite, return_unused), object_length)
+                    yield object_type, object_length, offset, None, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
 
                 else:  # OBJ_REF_DELTA
                     object_name = read_bytes(20)
                     needed_object_names.add(object_name)
-                    yield object_type, object_length, None, object_name, yield_with_asserted_length(uncompress_zlib(read_indefinite, return_unused), object_length)
+                    yield object_type, object_length, None, object_name, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
 
             trailer = read_bytes(20)
 
@@ -192,6 +250,9 @@ def mirror_repos(mappings,
     s3_client = get_s3_client()
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
+            shas = set()
+            shas_to_type = dict()
+
             parsed_target = urllib.parse.urlparse(target)
             assert parsed_target.scheme == 's3'
             bucket = parsed_target.netloc
@@ -206,23 +267,106 @@ def mirror_repos(mappings,
                 if items:
                     s3_client.delete_objects(Bucket=bucket, Delete={'Objects': items})
 
-            for object_type, object_length, delta_offset, delta_ref, object_bytes in get_pack_objects(http_client, source_base_url):
-                sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
+            for object_type, object_length, delta_offset, base_sha, object_bytes in get_pack_objects(http_client, source_base_url):
+                if object_type == 7:
+                    yield_indefinite, read_bytes, return_unused = get_reader(object_bytes)
+                    base_size = get_length(read_bytes)
+                    target_size = get_length(read_bytes)
 
-                temp_file_name =  f'{target_prefix}/mirror_tmp/1'
-                def with_sha():
-                    for chunk in object_bytes:
-                        sha.update(chunk)
-                        yield chunk
-                sha_hex = sha.hexdigest()
+                    def yield_obj_bytes():
+                        target_size_remaining = target_size
+                        while target_size_remaining:
+                            instruction = read_bytes(1)[0]
+                            assert instruction != 0
+                            if instruction >> 7:
+                                has_offset_1 = (instruction >> 0) & 1
+                                has_offset_2 = (instruction >> 1) & 1
+                                has_offset_3 = (instruction >> 2) & 1
+                                has_offset_4 = (instruction >> 3) & 1
+                                has_size_1 = (instruction >> 4) & 1
+                                has_size_2 = (instruction >> 5) & 1
+                                has_size_3 = (instruction >> 6) & 1
+                                offset = 0
+                                if has_offset_1:
+                                    offset += read_bytes(1)[0]
+                                if has_offset_2:
+                                    offset += read_bytes(1)[0] << 8
+                                if has_offset_3:
+                                    offset += read_bytes(1)[0] << 16
+                                if has_offset_4:
+                                    offset += read_bytes(1)[0] << 24
+                                size = 0
+                                if has_size_1:
+                                    size += read_bytes(1)[0]
+                                if has_size_2:
+                                    size += read_bytes(1)[0] << 8
+                                if has_size_3:
+                                    size += read_bytes(1)[0] << 16
 
-                s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=temp_file_name)
-                try:
-                    response = s3_client.copy(CopySource={
-                        'Bucket': bucket,
-                        'Key': temp_file_name,
-                    }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
-                finally:
-                    s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
+                                if size == 0:
+                                    size = 65536
+
+                                sha_hex = base_sha.hex()
+                                # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'bytes={}-{}'.format(offset, offset + size - 1))
+                                resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', Range='bytes={}-{}'.format(offset, offset + size - 1))
+                                target_size_remaining -= size
+                                yield from yield_with_asserted_length(resp['Body'], size)
+                            else:
+                                size = instruction & 127
+                                target_size_remaining -= size
+                                yield from yield_indefinite(size)
+
+                        # Not expecting any bytes - this is to exhaust the iterator to put back bytes after zlib
+                        for _ in object_bytes:
+                            pass
+                    try:
+                        base_type = shas_to_type[base_sha]
+                    except KeyError:
+                        for _ in object_bytes:
+                            pass
+                        continue
+
+                    sha = sha1(types_names_for_hash[base_type] + b' ' + str(target_size).encode() + b'\x00')
+                    def with_sha():
+                        for chunk in yield_obj_bytes():
+                            sha.update(chunk)
+                            yield chunk
+
+                    temp_file_name =  f'{target_prefix}/mirror_tmp/1'
+                    s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=temp_file_name)
+                    sha_hex = sha.hexdigest()
+                    try:
+                        # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'delta')
+                        s3_client.copy(CopySource={
+                            'Bucket': bucket,
+                            'Key': temp_file_name,
+                        }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+                    finally:
+                        s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
+
+                    shas.add(sha.digest())
+                    shas_to_type[sha.digest()] = base_type
+                else:
+                    sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
+
+                    temp_file_name =  f'{target_prefix}/mirror_tmp/1'
+                    def with_sha():
+                        for chunk in object_bytes:
+                            sha.update(chunk)
+                            yield chunk
+
+                    s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=temp_file_name)
+                    sha_hex = sha.hexdigest()
+                    try:
+                        # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'base')
+                        s3_client.copy(CopySource={
+                            'Bucket': bucket,
+                            'Key': temp_file_name,
+                        }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+                    finally:
+                        s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
+
+                    shas.add(sha.digest())
+                    shas_to_type[sha.digest()] = object_type
 
     print('End')
