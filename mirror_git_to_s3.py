@@ -1,3 +1,4 @@
+import itertools
 import zlib
 import urllib.parse
 from hashlib import sha1
@@ -126,6 +127,15 @@ def mirror_repos(mappings,
                 return_unused(len(dobj.unused_data))
                 break
 
+    def compress_zlib(chunks):
+        cobj = zlib.compressobj()
+        for chunk in chunks:
+            compressed_chunk = cobj.compress(chunk)
+            if compressed_chunk:
+                yield compressed_chunk
+        if compressed_chunk := cobj.flush():
+            yield compressed_chunk
+
     def to_filelike_obj(iterable):
         chunk = b''
         offset = 0
@@ -234,7 +244,7 @@ def mirror_repos(mappings,
 
                     sha_hex = base_sha.hex()
                     # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'bytes={}-{}'.format(offset, offset + size - 1))
-                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', Range='bytes={}-{}'.format(offset, offset + size - 1))
+                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
                     target_size_remaining -= size
                     yield from yield_with_asserted_length(resp['Body'], size)
                 else:
@@ -320,7 +330,8 @@ def mirror_repos(mappings,
 
             try:
                 for object_type, object_length, object_bytes in get_pack_objects(s3_client, http_client, bucket, target_prefix, source_base_url, shas):
-                    sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
+                    binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
+                    sha = sha1(binary_prefix)
                     temp_file_name =  f'{target_prefix}/mirror_tmp/1'
                     s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
                     sha_hex = sha.hexdigest()
@@ -329,11 +340,15 @@ def mirror_repos(mappings,
                         s3_client.copy(CopySource={
                             'Bucket': bucket,
                             'Key': temp_file_name,
-                        }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+                        }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
                     finally:
                         s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
 
                     shas[sha.digest()] = (object_type, object_length)
+
+                    # Upload in prefixed and compressed format to final location
+                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+                    s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
             finally:
                 clear_tmp(s3_client, bucket, target_prefix)
 
