@@ -30,3 +30,8 @@ dev = [
 [project.urls]
 "Homepage" = "https://github.com/uktrade/mirror-git-to-s3"
 "Bug Tracker" = "https://github.com/uktrade/mirror-git-to-s3/issues"
+
+[tool.hatch.build]
+include = [
+  "mirror_git_to_s3.py"
+]
