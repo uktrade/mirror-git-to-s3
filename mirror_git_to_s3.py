@@ -209,39 +209,24 @@ def mirror_repos(mappings,
         base_size = get_length(read_bytes)
         target_size = get_length(read_bytes)
 
+        def read_sparse(instruction, instruction_bit_range):
+            value = 0
+            factor = 0
+            for b in instruction_bit_range:
+                has = (instruction >> b) & 1
+                if has:
+                    value += read_bytes(1)[0] << factor
+                factor += 8
+            return value
+
         def yield_object_bytes():
             target_size_remaining = target_size
             while target_size_remaining:
                 instruction = read_bytes(1)[0]
                 assert instruction != 0
                 if instruction >> 7:
-                    has_offset_1 = (instruction >> 0) & 1
-                    has_offset_2 = (instruction >> 1) & 1
-                    has_offset_3 = (instruction >> 2) & 1
-                    has_offset_4 = (instruction >> 3) & 1
-                    has_size_1 = (instruction >> 4) & 1
-                    has_size_2 = (instruction >> 5) & 1
-                    has_size_3 = (instruction >> 6) & 1
-                    offset = 0
-                    if has_offset_1:
-                        offset += read_bytes(1)[0]
-                    if has_offset_2:
-                        offset += read_bytes(1)[0] << 8
-                    if has_offset_3:
-                        offset += read_bytes(1)[0] << 16
-                    if has_offset_4:
-                        offset += read_bytes(1)[0] << 24
-                    size = 0
-                    if has_size_1:
-                        size += read_bytes(1)[0]
-                    if has_size_2:
-                        size += read_bytes(1)[0] << 8
-                    if has_size_3:
-                        size += read_bytes(1)[0] << 16
-
-                    if size == 0:
-                        size = 65536
-
+                    offset = read_sparse(instruction, range(0, 4))
+                    size = read_sparse(instruction, range(4, 7)) or 65536
                     sha_hex = base_sha.hex()
                     resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
                     target_size_remaining -= size
