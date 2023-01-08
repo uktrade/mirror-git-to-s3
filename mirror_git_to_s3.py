@@ -250,6 +250,16 @@ def mirror_repos(mappings,
 
         return object_type, target_size, yield_object_bytes()
 
+    def clear_tmp(s3_client, bucket, target_prefix):
+        paginator = s3_client.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=bucket, Prefix=f'{target_prefix}/mirror_tmp/'):
+            items = [
+                {'Key': item['Key']}
+                for item in page.get('Contents', [])
+            ]
+            if items:
+                s3_client.delete_objects(Bucket=bucket, Delete={'Objects': items})
+
     def get_pack_objects(http_client, base_url, shas):
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
@@ -306,30 +316,25 @@ def mirror_repos(mappings,
             assert parsed_target.scheme == 's3'
             bucket = parsed_target.netloc
             target_prefix = parsed_target.path[1:] # Remove leading /
+            clear_tmp(s3_client, bucket, target_prefix)
 
-            paginator = s3_client.get_paginator('list_objects_v2')
-            for page in paginator.paginate(Bucket=bucket, Prefix=f'{target_prefix}/mirror_tmp/'):
-                items = [
-                    {'Key': item['Key']}
-                    for item in page.get('Contents', [])
-                ]
-                if items:
-                    s3_client.delete_objects(Bucket=bucket, Delete={'Objects': items})
+            try:
+                for object_type, object_length, object_bytes in get_pack_objects(http_client, source_base_url, shas):
+                    sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
+                    temp_file_name =  f'{target_prefix}/mirror_tmp/1'
+                    s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
+                    sha_hex = sha.hexdigest()
+                    try:
+                        # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'base')
+                        s3_client.copy(CopySource={
+                            'Bucket': bucket,
+                            'Key': temp_file_name,
+                        }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+                    finally:
+                        s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
 
-            for object_type, object_length, object_bytes in get_pack_objects(http_client, source_base_url, shas):
-                sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
-                temp_file_name =  f'{target_prefix}/mirror_tmp/1'
-                s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
-                sha_hex = sha.hexdigest()
-                try:
-                    # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'base')
-                    s3_client.copy(CopySource={
-                        'Bucket': bucket,
-                        'Key': temp_file_name,
-                    }, Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
-                finally:
-                    s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
-
-                shas[sha.digest()] = (object_type, object_length)
+                    shas[sha.digest()] = (object_type, object_length)
+            finally:
+                clear_tmp(s3_client, bucket, target_prefix)
 
     print('End')
