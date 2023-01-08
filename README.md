@@ -23,18 +23,6 @@ mirror_repos((
 ))
 ```
 
-In the previous example the iterable is itself a tuple. However in general any iterable is supported, Under the hood repositories are processed in parallel, and transfers can start before the entire list is known.
-
-```python
-from mirror_git_to_s3 import mirror_repos
-
-def mappings():
-    yield ('https://example.test/my-first-repo', 's3://my-bucket/my-first-repo')
-    yield ('https://example.test/my-second-repo', 's3://my-bucket/my-second-repo')
-
-mirror_repos(mappings())
-```
-
 Under the hood, boto3 is used to communicate with S3. The boto3 client is constructed automatically, but you can override the default by using the `get_s3_client` argument.
 
 ```python
