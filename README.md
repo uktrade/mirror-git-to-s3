@@ -23,6 +23,12 @@ mirror_repos((
 ))
 ```
 
+Once a repository is mirrored to a bucket that doesn't need authentication to read, it can be cloned using standard git commands.
+
+```bash
+git clone https://my-bucket.s3.eu-west-2.amazonaws.com/my-first-repo
+````
+
 Under the hood, boto3 is used to communicate with S3. The boto3 client is constructed automatically, but you can override the default by using the `get_s3_client` argument.
 
 ```python
