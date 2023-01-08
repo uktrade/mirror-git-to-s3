@@ -171,7 +171,6 @@ def mirror_repos(mappings,
         return t, length
 
     def get_length(read_bytes):
-
         bits_to_shift_length = 0
         b = 128  # To enter the loop
         length = 0
