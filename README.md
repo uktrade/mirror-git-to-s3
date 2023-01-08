@@ -2,8 +2,6 @@
 
 Python functions and CLI to mirror git repositories available on HTTP(S) to S3. Essentially converts smart protocol git repositories to the so-called dumb protocol. Does not use temporary disk space, and uses streaming under the hood. This should allow the mirroring to be run on systems that don't have much disk or available memory, even on large repositories.
 
-> Work in progress. This README serves as a rough design spec.
-
 
 ## Installation
 
