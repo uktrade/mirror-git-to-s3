@@ -194,7 +194,7 @@ def mirror_repos(mappings,
             sha.update(chunk)
             yield chunk
 
-    def construct_object_from_ref_delta(base_sha, delta_bytes):
+    def construct_object_from_ref_delta(shas, base_sha, delta_bytes):
         yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
         base_size = get_length(read_bytes)
         target_size = get_length(read_bytes)
@@ -250,7 +250,7 @@ def mirror_repos(mappings,
 
         return object_type, target_size, yield_object_bytes()
 
-    def get_pack_objects(http_client, base_url):
+    def get_pack_objects(http_client, base_url, shas):
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
 
@@ -284,7 +284,7 @@ def mirror_repos(mappings,
                 assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
                 yield \
                     (object_type, object_length, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)) if object_type in (1, 2, 3, 4) else \
-                    construct_object_from_ref_delta(base_sha=read_bytes(20), delta_bytes=yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length))
+                    construct_object_from_ref_delta(shas, base_sha=read_bytes(20), delta_bytes=yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length))
 
             trailer = read_bytes(20)
 
@@ -316,7 +316,7 @@ def mirror_repos(mappings,
                 if items:
                     s3_client.delete_objects(Bucket=bucket, Delete={'Objects': items})
 
-            for object_type, object_length, object_bytes in get_pack_objects(http_client, source_base_url):
+            for object_type, object_length, object_bytes in get_pack_objects(http_client, source_base_url, shas):
                 sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
                 temp_file_name =  f'{target_prefix}/mirror_tmp/1'
                 s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
