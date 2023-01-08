@@ -313,8 +313,6 @@ def mirror_repos(mappings,
         2: b'tree',
         3: b'blob',
         4: b'tag',
-        6: b'',  # delta - hash not calculated
-        7: b'',  # delta - hash not calculated
     }
 
     s3_client = get_s3_client()
