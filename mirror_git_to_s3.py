@@ -190,6 +190,11 @@ def mirror_repos(mappings,
             yield chunk
         assert length == expected_length
 
+    def yield_with_sha(bytes_iter, sha):
+        for chunk in bytes_iter:
+            sha.update(chunk)
+            yield chunk
+
     def get_pack_objects(http_client, base_url):
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
@@ -321,13 +326,8 @@ def mirror_repos(mappings,
 
                     base_type, _ = shas[base_sha]
                     sha = sha1(types_names_for_hash[base_type] + b' ' + str(target_size).encode() + b'\x00')
-                    def with_sha():
-                        for chunk in yield_obj_bytes():
-                            sha.update(chunk)
-                            yield chunk
-
                     temp_file_name =  f'{target_prefix}/mirror_tmp/1'
-                    s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=temp_file_name)
+                    s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(yield_obj_bytes(), sha)), Bucket=bucket, Key=temp_file_name)
                     sha_hex = sha.hexdigest()
                     try:
                         # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'delta')
@@ -341,14 +341,8 @@ def mirror_repos(mappings,
                     shas[sha.digest()] = (base_type, target_size)
                 else:
                     sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
-
                     temp_file_name =  f'{target_prefix}/mirror_tmp/1'
-                    def with_sha():
-                        for chunk in object_bytes:
-                            sha.update(chunk)
-                            yield chunk
-
-                    s3_client.upload_fileobj(to_filelike_obj(with_sha()), Bucket=bucket, Key=temp_file_name)
+                    s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
                     sha_hex = sha.hexdigest()
                     try:
                         # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'base')
