@@ -22,5 +22,6 @@ docker run --rm \
   minio/mc \
   sh -c '
     mc alias set my-minio http://mirror-git-to-s3-minio:9000/ AKIAIDIDIDIDIDIDIDID aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&
-    mc mb my-minio/my-bucket
+    mc mb my-minio/my-bucket &&
+    mc anonymous set download my-minio/my-bucket
   '
