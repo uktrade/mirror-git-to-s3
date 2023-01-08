@@ -254,22 +254,23 @@ def mirror_repos(mappings,
             if items:
                 s3_client.delete_objects(Bucket=bucket, Delete={'Objects': items})
 
-    def get_pack_objects(s3_client, http_client, bucket, target_prefix, base_url, shas):
+    def get_refs(http_client, base_url):
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
-
-        sha_refs = [
+        return [
             line.split()
             for line in r.content.splitlines()[2:-1]
         ]
+
+    def get_pack_objects(s3_client, http_client, bucket, target_prefix, base_url, refs, shas):
         pack_file_request = b''.join(
             b'0032want ' + sha[4:] + b'\n'
-            for sha, ref in sha_refs
+            for sha, ref in refs
         ) + b'0000' + b'0009done\n'
 
         got_object_names = {}
         with http_client.stream('POST', f'{base_url}/git-upload-pack', content=pack_file_request) as response:
-            r.raise_for_status()
+            response.raise_for_status()
             yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
 
             length = int(read_bytes(4), 16)
@@ -310,8 +311,10 @@ def mirror_repos(mappings,
             target_prefix = parsed_target.path[1:] # Remove leading /
             clear_tmp(s3_client, bucket, target_prefix)
 
+            refs = get_refs(http_client, source_base_url)
+
             try:
-                for object_type, object_length, object_bytes in get_pack_objects(s3_client, http_client, bucket, target_prefix, source_base_url, shas):
+                for object_type, object_length, object_bytes in get_pack_objects(s3_client, http_client, bucket, target_prefix, source_base_url, refs, shas):
                     binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
                     sha = sha1(binary_prefix)
                     temp_file_name =  f'{target_prefix}/mirror_tmp/1'
