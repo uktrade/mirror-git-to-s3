@@ -208,7 +208,6 @@ def mirror_repos(mappings,
         ) + b'0000' + b'0009done\n'
 
         got_object_names = {}
-        needed_object_names = set()
         with http_client.stream('POST', f'{base_url}/git-upload-pack', content=pack_file_request) as response:
             r.raise_for_status()
             yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
@@ -237,7 +236,6 @@ def mirror_repos(mappings,
 
                 else:  # OBJ_REF_DELTA
                     object_name = read_bytes(20)
-                    needed_object_names.add(object_name)
                     yield object_type, object_length, None, object_name, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
 
             trailer = read_bytes(20)
