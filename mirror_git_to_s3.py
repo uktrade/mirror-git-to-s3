@@ -324,14 +324,10 @@ def mirror_repos(mappings,
                     temp_file_name =  f'{target_prefix}/mirror_tmp/1'
                     s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
                     sha_hex = sha.hexdigest()
-                    try:
-                        s3_client.copy(CopySource={
-                            'Bucket': bucket,
-                            'Key': temp_file_name,
-                        }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
-                    finally:
-                        s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
-
+                    s3_client.copy(CopySource={
+                        'Bucket': bucket,
+                        'Key': temp_file_name,
+                    }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
                     shas[sha.digest()] = (object_type, object_length)
 
                     # Upload in prefixed and compressed format to final location
