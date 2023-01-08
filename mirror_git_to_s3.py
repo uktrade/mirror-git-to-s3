@@ -225,14 +225,10 @@ def mirror_repos(mappings,
 
             for i in range(0, number_of_objects):
                 object_type, object_length = get_object_type_and_length(read_bytes)
-                assert object_type in (1, 2, 3, 4, 6, 7)
+                assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
 
                 if object_type in (1, 2, 3, 4):
                     yield object_type, object_length, None, None, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
-
-                elif object_type == 6:  # OBJ_OFS_DELTA
-                    offset = get_length(read_bytes)
-                    yield object_type, object_length, offset, None, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
 
                 else:  # OBJ_REF_DELTA
                     object_name = read_bytes(20)
