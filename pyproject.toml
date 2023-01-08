@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Python functions and CLI to mirror git repositories available on HTTP(S) to S3"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
