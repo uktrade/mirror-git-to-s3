@@ -18,6 +18,7 @@ classifiers = [
     "Topic :: Software Development :: Version Control :: Git",
 ]
 dependencies = [
+    "click>=8.1.3",
     "boto3>=1.26.27",
     "httpx>=0.23.1",
 ]
@@ -35,3 +36,6 @@ dev = [
 include = [
   "mirror_git_to_s3.py"
 ]
+
+[project.scripts]
+mirror-git-to-s3 = "mirror_git_to_s3:main"

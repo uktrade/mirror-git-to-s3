@@ -8,6 +8,7 @@ from struct import unpack
 from threading import Lock, Event, Thread
 
 import boto3
+import click
 import httpx
 
 
@@ -343,3 +344,14 @@ def mirror_repos(mappings,
                 clear_tmp(s3_client, bucket, target_prefix)
 
     print('End')
+
+
+@click.command()
+@click.option('--source', '-s', multiple=True, required=True)
+@click.option('--target', '-s', multiple=True, required=True)
+def main(source, target):
+    mirror_repos(zip(source, target))
+
+
+if __name__ == '__main__':
+    main()
