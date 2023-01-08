@@ -14,10 +14,6 @@ def test():
         aws_secret_access_key='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         region_name='us-east-1',
     )
-    try:
-        s3_client.create_bucket(Bucket=bucket_name)
-    except s3_client.exceptions.BucketAlreadyOwnedByYou:
-        pass
     paginator = s3_client.get_paginator('list_objects_v2')
     for page in paginator.paginate(Bucket=bucket_name):
         items = [
