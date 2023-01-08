@@ -250,8 +250,7 @@ def mirror_repos(mappings,
     s3_client = get_s3_client()
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
-            shas = set()
-            shas_to_type = dict()
+            shas = dict()
 
             parsed_target = urllib.parse.urlparse(target)
             assert parsed_target.scheme == 's3'
@@ -320,7 +319,7 @@ def mirror_repos(mappings,
                         for _ in object_bytes:
                             pass
                     try:
-                        base_type = shas_to_type[base_sha]
+                        base_type, _ = shas[base_sha]
                     except KeyError:
                         for _ in object_bytes:
                             pass
@@ -344,8 +343,7 @@ def mirror_repos(mappings,
                     finally:
                         s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
 
-                    shas.add(sha.digest())
-                    shas_to_type[sha.digest()] = base_type
+                    shas[sha.digest()] = (base_type, target_size)
                 else:
                     sha = sha1(types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00')
 
@@ -366,7 +364,6 @@ def mirror_repos(mappings,
                     finally:
                         s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
 
-                    shas.add(sha.digest())
-                    shas_to_type[sha.digest()] = object_type
+                    shas[sha.digest()] = (object_type, object_length)
 
     print('End')
