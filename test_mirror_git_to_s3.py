@@ -1,4 +1,6 @@
 import uuid
+import subprocess
+import tempfile
 import boto3
 import botocore
 
@@ -27,3 +29,8 @@ def test():
         ('https://github.com/uktrade/mirror-git-to-s3.git', f's3://{bucket_name}/mirror-git-to-s3'),
         # ('https://github.com/uktrade/data-workspace.git',  f's3://{bucket_name}/data-workspace'),
     ), get_s3_client=lambda: s3_client)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        completed = subprocess.run(["git", "clone", f"http://localhost:9000/{bucket_name}/mirror-git-to-s3", tmpdir])
+
+    assert completed.returncode == 0
