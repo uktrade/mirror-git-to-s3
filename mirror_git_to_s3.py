@@ -1,4 +1,5 @@
 import itertools
+import re
 import zlib
 import urllib.parse
 from hashlib import sha1
@@ -257,9 +258,11 @@ def mirror_repos(mappings,
     def get_refs(http_client, base_url):
         r = http_client.request('GET', f'{base_url}/info/refs?service=git-upload-pack')
         r.raise_for_status()
-        return [
+        lines = r.content.splitlines()
+        head_ref = re.match(b'.*symref=HEAD:(\\S+).*', lines[1]).group(1)
+        return head_ref, [
             line.split()
-            for line in r.content.splitlines()[2:-1]
+            for line in lines[2:-1]
         ]
 
     def get_pack_objects(s3_client, http_client, bucket, target_prefix, base_url, refs, shas):
@@ -311,7 +314,7 @@ def mirror_repos(mappings,
             target_prefix = parsed_target.path[1:] # Remove leading /
             clear_tmp(s3_client, bucket, target_prefix)
 
-            refs = get_refs(http_client, source_base_url)
+            head_ref, refs = get_refs(http_client, source_base_url)
 
             try:
                 for object_type, object_length, object_bytes in get_pack_objects(s3_client, http_client, bucket, target_prefix, source_base_url, refs, shas):
@@ -334,6 +337,7 @@ def mirror_repos(mappings,
                     resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
                     s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
 
+                s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
                 s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
             finally:
                 clear_tmp(s3_client, bucket, target_prefix)
