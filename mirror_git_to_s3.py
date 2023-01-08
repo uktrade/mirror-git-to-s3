@@ -318,13 +318,8 @@ def mirror_repos(mappings,
                         # Not expecting any bytes - this is to exhaust the iterator to put back bytes after zlib
                         for _ in object_bytes:
                             pass
-                    try:
-                        base_type, _ = shas[base_sha]
-                    except KeyError:
-                        for _ in object_bytes:
-                            pass
-                        continue
 
+                    base_type, _ = shas[base_sha]
                     sha = sha1(types_names_for_hash[base_type] + b' ' + str(target_size).encode() + b'\x00')
                     def with_sha():
                         for chunk in yield_obj_bytes():
