@@ -243,7 +243,6 @@ def mirror_repos(mappings,
                         size = 65536
 
                     sha_hex = base_sha.hex()
-                    # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'bytes={}-{}'.format(offset, offset + size - 1))
                     resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
                     target_size_remaining -= size
                     yield from yield_with_asserted_length(resp['Body'], size)
@@ -334,7 +333,6 @@ def mirror_repos(mappings,
                     s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
                     sha_hex = sha.hexdigest()
                     try:
-                        # print(f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', 'base')
                         s3_client.copy(CopySource={
                             'Bucket': bucket,
                             'Key': temp_file_name,
