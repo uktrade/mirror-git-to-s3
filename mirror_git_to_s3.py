@@ -67,6 +67,7 @@ def mirror_repos(mappings,
         queue = SimpleQueue()
         lock = Lock()
         amount_in_queue = 0
+        done = object()
 
         def pull():
             nonlocal amount_in_queue, fetch_next, thread_exception
@@ -78,6 +79,7 @@ def mirror_repos(mappings,
                     try:
                         chunk = next(it)
                     except StopIteration:
+                        queue.put(done)
                         break
                     len_chunk = len(chunk)
                     with lock:
@@ -96,6 +98,8 @@ def mirror_repos(mappings,
         try:
             fetch_next.set()
             while chunk := queue.get(timeout=60):
+                if chunk is done:
+                    break
                 len_chunk = len(chunk)
                 with lock:
                     amount_in_queue -= len_chunk
@@ -206,6 +210,27 @@ def mirror_repos(mappings,
             sha.update(chunk)
             yield chunk
 
+    def yield_with_lfs(bytes_iter):
+        search_for = b'version https://git-lfs.github.com/spec/v1\n'
+        lfs_pointer_raw = b''
+
+        def _to_yield():
+            nonlocal lfs_pointer_raw
+
+            for chunk in bytes_iter:
+                if len(lfs_pointer_raw) < len(search_for) or lfs_pointer_raw[:len(search_for)] == search_for:
+                    lfs_pointer_raw += chunk
+                yield chunk
+
+        def _is_lfs():
+            return lfs_pointer_raw[:len(search_for)] == search_for
+
+        def _lfs_pointer():
+            lines = lfs_pointer_raw.splitlines()
+            return lines[1].split(b':')[1].decode(), int(lines[2].split()[1].decode())
+
+        return _to_yield(), _is_lfs, _lfs_pointer
+
     def construct_object_from_ref_delta(s3_client, bucket, target_prefix, shas, base_sha, delta_bytes):
         yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
         base_size = get_length(read_bytes)
@@ -297,6 +322,17 @@ def mirror_repos(mappings,
 
             trailer = read_bytes(20)
 
+    def yield_lfs_data(base_url, http_client, lfs_sha256, lfs_size):
+        batch_response = http_client.post(base_url.removesuffix('.git') + '.git/info/lfs/objects/batch', json={
+            'operation': 'download',
+            'objects': [{'oid': lfs_sha256, 'size': lfs_size}]
+        })
+        batch_response.raise_for_status()
+        download_href = batch_response.json()['objects'][0]['actions']['download']['href']
+
+        with httpx.stream('GET', download_href) as bytes_response:
+            yield from bytes_response.iter_bytes()
+
     types_names_for_hash = {
         1: b'commit',
         2: b'tree',
@@ -322,7 +358,9 @@ def mirror_repos(mappings,
                     binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
                     sha = sha1(binary_prefix)
                     temp_file_name =  f'{target_prefix}/mirror_tmp/1'
-                    s3_client.upload_fileobj(to_filelike_obj(yield_with_sha(object_bytes, sha)), Bucket=bucket, Key=temp_file_name)
+                    with_sha = yield_with_sha(object_bytes, sha)
+                    with_lfs_check, is_lfs, lfs_pointer = yield_with_lfs(with_sha)
+                    s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name)
                     sha_hex = sha.hexdigest()
                     s3_client.copy(CopySource={
                         'Bucket': bucket,
@@ -333,6 +371,12 @@ def mirror_repos(mappings,
                     # Upload in prefixed and compressed format to final location
                     resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
                     s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+
+                    if not is_lfs():
+                        continue
+                    lfs_sha256, lfs_size = lfs_pointer()
+                    lfs_data = yield_lfs_data(source_base_url, http_client, lfs_sha256, lfs_size)
+                    s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256)
 
                 s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
                 s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
