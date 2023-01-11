@@ -27,7 +27,7 @@ mirror_repos((
 ))
 ```
 
-Once a repository is mirrored to a bucket that doesn't need authentication to read, it can be cloned using standard git commands.
+Once a repository is mirrored to a bucket that doesn't need authentication to read, it can be cloned using standard git commands using the [virtual host or path of the S3 bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html).
 
 ```bash
 git clone https://my-bucket.s3.eu-west-2.amazonaws.com/my-first-repo
