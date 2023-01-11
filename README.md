@@ -1,6 +1,10 @@
 # mirror-git-to-s3 ![Build Status](https://github.com/uktrade/mirror-git-to-s3/actions/workflows/tests.yml/badge.svg?branch=main)
 
-Python functions and CLI to mirror git repositories available on HTTP(S) to S3. Essentially converts smart protocol git repositories to the so-called dumb protocol. Does not use temporary disk space, and uses streaming under the hood. This should allow the mirroring to be run on systems that don't have much disk or available memory, even on repositories with large objects. However, at the time of writing repositories with many objects can be slow to mirror.
+Python functions and CLI to mirror public git repositories available on HTTP(S) to S3. Essentially converts smart protocol git repositories to the so-called dumb protocol. Does not use temporary disk space, and uses streaming under the hood. This should allow the mirroring to be run on systems that don't have much disk or available memory, even on repositories with large objects.
+
+This project mirrors objects stored on Large File Storage (LFS). Note however LFS objects are not accessible via the dumb protocol. To work around this, you can use [git-lfs-http-mirror](https://github.com/uktrade/git-lfs-http-mirror)  that fires up a temporary local LFS server during git commands.
+
+At the time of writing repositories with many objects can be slow to mirror.
 
 
 ## Installation
