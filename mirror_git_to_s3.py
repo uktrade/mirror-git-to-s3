@@ -365,7 +365,7 @@ def mirror_repos(mappings,
         s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256)
         print('Uploaded', lfs_sha256, lfs_size)
 
-    def worker(q, done):
+    def worker_func(q, done):
         while item := q.get():
             try:
                 if item is done:
@@ -385,15 +385,15 @@ def mirror_repos(mappings,
 
     s3_client = get_s3_client()
 
-    # Upload LFS files outside of normal processing
-    lfs_queue = Queue(maxsize=lfs_queue_size)
-    lfs_done = object()
-    lfs_workers = [Thread(target=worker, args=(lfs_queue, lfs_done)) for _ in range(0, num_lfs_workers)]
-    for worker in lfs_workers:
-        worker.start()
-
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
+            # Upload LFS files outside of normal processing
+            lfs_queue = Queue(maxsize=lfs_queue_size)
+            lfs_done = object()
+            lfs_workers = [Thread(target=worker_func, args=(lfs_queue, lfs_done)) for _ in range(0, num_lfs_workers)]
+            for worker in lfs_workers:
+                worker.start()
+
             shas = dict()
 
             parsed_target = urllib.parse.urlparse(target)
