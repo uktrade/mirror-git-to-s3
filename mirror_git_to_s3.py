@@ -1,6 +1,7 @@
 import itertools
 import re
 import zlib
+import uuid
 import urllib.parse
 from functools import partial
 from hashlib import sha1
@@ -297,7 +298,7 @@ def mirror_repos(mappings,
     def upload_object(http_client, bucket, base_url, object_type, object_length, object_bytes):
         binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
         sha = sha1(binary_prefix)
-        temp_file_name =  f'{target_prefix}/mirror_tmp/1'
+        temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
         with_sha = yield_with_sha(object_bytes, sha)
         with_lfs_check, is_lfs, lfs_pointer = yield_with_lfs(with_sha)
         s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name)
@@ -306,6 +307,7 @@ def mirror_repos(mappings,
             'Bucket': bucket,
             'Key': temp_file_name,
         }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+        s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
         shas[sha.digest()] = object_type
 
         # Upload in prefixed and compressed format to final location
