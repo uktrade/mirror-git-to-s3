@@ -300,7 +300,6 @@ def mirror_repos(mappings,
             for sha, ref in refs
         ) + b'0000' + b'0009done\n'
 
-        got_object_names = {}
         with http_client.stream('POST', f'{base_url}/git-upload-pack', content=pack_file_request) as response:
             response.raise_for_status()
             yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
