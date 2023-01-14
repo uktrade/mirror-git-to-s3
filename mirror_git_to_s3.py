@@ -270,7 +270,7 @@ def mirror_repos(mappings,
             for _ in delta_bytes:
                 pass
 
-        object_type, _ = shas[base_sha]
+        object_type = shas[base_sha]
 
         return object_type, target_size, yield_object_bytes()
 
@@ -306,7 +306,7 @@ def mirror_repos(mappings,
             'Bucket': bucket,
             'Key': temp_file_name,
         }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
-        shas[sha.digest()] = (object_type, object_length)
+        shas[sha.digest()] = object_type
 
         # Upload in prefixed and compressed format to final location
         resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
