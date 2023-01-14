@@ -2,8 +2,9 @@ import itertools
 import re
 import zlib
 import urllib.parse
+from functools import partial
 from hashlib import sha1
-from queue import SimpleQueue
+from queue import SimpleQueue, Queue
 from struct import unpack
 from threading import Lock, Event, Thread
 
@@ -15,6 +16,8 @@ import httpx
 def mirror_repos(mappings,
         get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3)),
         get_s3_client=lambda: boto3.client('s3'),
+        num_lfs_workers=10,
+        lfs_queue_size=10000,  # A queue item is small
     ):
 
     def next_or_truncated_error(it):
@@ -322,7 +325,7 @@ def mirror_repos(mappings,
 
             trailer = read_bytes(20)
 
-    def yield_lfs_data(base_url, http_client, lfs_sha256, lfs_size):
+    def yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size):
         batch_response = http_client.post(base_url.removesuffix('.git') + '.git/info/lfs/objects/batch', json={
             'operation': 'download',
             'objects': [{'oid': lfs_sha256, 'size': lfs_size}]
@@ -333,6 +336,23 @@ def mirror_repos(mappings,
         with httpx.stream('GET', download_href) as bytes_response:
             yield from bytes_response.iter_bytes()
 
+    def upload_lfs(s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size):
+        print('Uploading LFS', lfs_sha256, lfs_size)
+        lfs_data = yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size)
+        s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256)
+        print('Uploaded', lfs_sha256, lfs_size)
+
+    def worker(q, done):
+        while item := q.get():
+            try:
+                if item is done:
+                    break
+                item()
+            except Exception as e:
+                print('Exception in thread', e)
+            finally:
+                q.task_done()
+
     types_names_for_hash = {
         1: b'commit',
         2: b'tree',
@@ -341,6 +361,14 @@ def mirror_repos(mappings,
     }
 
     s3_client = get_s3_client()
+
+    # Upload LFS files outside of normal processing
+    lfs_queue = Queue(maxsize=lfs_queue_size)
+    lfs_done = object()
+    lfs_workers = [Thread(target=worker, args=(lfs_queue, lfs_done)) for _ in range(0, num_lfs_workers)]
+    for worker in lfs_workers:
+        worker.start()
+
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
             shas = dict()
@@ -375,8 +403,15 @@ def mirror_repos(mappings,
                     if not is_lfs():
                         continue
                     lfs_sha256, lfs_size = lfs_pointer()
-                    lfs_data = yield_lfs_data(source_base_url, http_client, lfs_sha256, lfs_size)
-                    s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256)
+                    lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, source_base_url, lfs_sha256, lfs_size))
+
+                # Ensure all LFS workers have finished
+                print('Regular objects uploaded. Waiting for LFS objects to be copied')
+                for i in range(0, num_lfs_workers):
+                    lfs_queue.put(lfs_done)
+                for worker in lfs_workers:
+                    worker.join()
+                print('LFS objects uploaded')
 
                 s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
                 s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
