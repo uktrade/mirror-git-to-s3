@@ -294,16 +294,6 @@ def mirror_repos(mappings,
             for line in lines[2:-1]
         ]
 
-    def get_pack_objects(s3_client, bucket, target_prefix, yield_indefinite, read_bytes, return_unused, shas):
-        for i in range(0, number_of_objects):
-            object_type, object_length = get_object_type_and_length(read_bytes)
-            assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
-            yield \
-                (object_type, object_length, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)) if object_type in (1, 2, 3, 4) else \
-                construct_object_from_ref_delta(s3_client, bucket, target_prefix, shas, base_sha=read_bytes(20), delta_bytes=yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length))
-
-        trailer = read_bytes(20)
-
     def upload_object(http_client, bucket, base_url, object_type, object_length, object_bytes):
         binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
         sha = sha1(binary_prefix)
@@ -405,8 +395,17 @@ def mirror_repos(mappings,
 
                     number_of_objects, = unpack('>I', read_bytes(4))
 
-                    for object_type, object_length, object_bytes in get_pack_objects(s3_client, bucket, target_prefix, yield_indefinite, read_bytes, return_unused, shas):
+                    for i in range(0, number_of_objects):
+                        object_type, object_length = get_object_type_and_length(read_bytes)
+                        assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
+
+                        object_type, object_length, object_bytes = \
+                            (object_type, object_length, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)) if object_type in (1, 2, 3, 4) else \
+                            construct_object_from_ref_delta(s3_client, bucket, target_prefix, shas, base_sha=read_bytes(20), delta_bytes=yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length))
+
                         upload_object(http_client, bucket, source_base_url, object_type, object_length, object_bytes)
+
+                    trailer = read_bytes(20)
 
                     # Ensure all LFS workers have finished
                     print('Regular objects uploaded. Waiting for LFS objects to be copied')
