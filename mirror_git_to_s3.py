@@ -3,6 +3,7 @@ import re
 import zlib
 import uuid
 import urllib.parse
+from collections import defaultdict
 from functools import partial
 from hashlib import sha1
 from queue import SimpleQueue, Queue
@@ -17,6 +18,7 @@ import httpx
 def mirror_repos(mappings,
         get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3)),
         get_s3_client=lambda: boto3.client('s3'),
+        num_object_workers=10,
         num_lfs_workers=10,
         lfs_queue_size=10000,  # A queue item is small
     ):
@@ -235,7 +237,13 @@ def mirror_repos(mappings,
 
         return _to_yield(), _is_lfs, _lfs_pointer
 
-    def construct_object_from_ref_delta(s3_client, bucket, target_prefix, shas, base_sha, delta_bytes):
+    def queue_to_iterable(queue, done):
+        while value := queue.get():
+            if value is done:
+                break
+            yield value
+
+    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, base_sha, delta_bytes):
         yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
         base_size = get_length(read_bytes)
         target_size = get_length(read_bytes)
@@ -271,9 +279,14 @@ def mirror_repos(mappings,
             for _ in delta_bytes:
                 pass
 
-        object_type = shas[base_sha]
+        # Wait to make sure the base object has been uploaded
+        with sha_lock:
+            sha_event = sha_events[base_sha]
+        sha_event.wait()
+        with sha_lock:
+            object_type = shas[base_sha]
 
-        return object_type, target_size, yield_object_bytes()
+        upload_object(http_client, bucket, base_url, object_type, target_size, sha_lock, sha_events, shas, yield_object_bytes())
 
     def clear_tmp(s3_client, bucket, target_prefix):
         paginator = s3_client.get_paginator('list_objects_v2')
@@ -295,7 +308,7 @@ def mirror_repos(mappings,
             for line in lines[2:-1]
         ]
 
-    def upload_object(http_client, bucket, base_url, object_type, object_length, object_bytes):
+    def upload_object(http_client, bucket, base_url, object_type, object_length, sha_lock, sha_events, shas, object_bytes):
         binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
         sha = sha1(binary_prefix)
         temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
@@ -308,11 +321,14 @@ def mirror_repos(mappings,
             'Key': temp_file_name,
         }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
         s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
-        shas[sha.digest()] = object_type
 
         # Upload in prefixed and compressed format to final location
         resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
         s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+
+        with sha_lock:
+            shas[sha.digest()] = object_type
+            sha_events[sha.digest()].set()
 
         if not is_lfs():
             return
@@ -358,14 +374,22 @@ def mirror_repos(mappings,
 
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
-            # Upload LFS files outside of normal processing
+            # Process objects and LFS files in separate threads so (when possible) to minimise blocking
+            object_queue = Queue(maxsize=1)
+            object_done = object()
+            object_workers = [Thread(target=worker_func, args=(object_queue, object_done)) for _ in range(0, num_object_workers)]
+            for worker in object_workers:
+                worker.start()
+
             lfs_queue = Queue(maxsize=lfs_queue_size)
             lfs_done = object()
             lfs_workers = [Thread(target=worker_func, args=(lfs_queue, lfs_done)) for _ in range(0, num_lfs_workers)]
             for worker in lfs_workers:
                 worker.start()
 
-            shas = dict()
+            sha_lock = Lock()
+            sha_events = defaultdict(Event)
+            shas = {}
 
             parsed_target = urllib.parse.urlparse(target)
             assert parsed_target.scheme == 's3'
@@ -401,13 +425,25 @@ def mirror_repos(mappings,
                         object_type, object_length = get_object_type_and_length(read_bytes)
                         assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
 
-                        object_type, object_length, object_bytes = \
-                            (object_type, object_length, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)) if object_type in (1, 2, 3, 4) else \
-                            construct_object_from_ref_delta(s3_client, bucket, target_prefix, shas, base_sha=read_bytes(20), delta_bytes=yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length))
+                        uncompressed = yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
+                        object_bytes_queue = Queue(maxsize=1)
+                        object_bytes_done = object()
 
-                        upload_object(http_client, bucket, source_base_url, object_type, object_length, object_bytes)
+                        object_queue.put(
+                            partial(upload_object, http_client, bucket, source_base_url, object_type, object_length, sha_lock, sha_events, shas, object_bytes=queue_to_iterable(object_bytes_queue, object_bytes_done)) if object_type in (1, 2, 3, 4) else \
+                            partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue, object_bytes_done))
+                        )
+                        for chunk in uncompressed:
+                            object_bytes_queue.put(chunk)
+                        object_bytes_queue.put(object_bytes_done)
 
                     trailer = read_bytes(20)
+
+                    print('Waiting for regular objects to be uploaded')
+                    for i in range(0, num_object_workers):
+                        object_queue.put(object_done)
+                    for worker in object_workers:
+                        worker.join()
 
                     # Ensure all LFS workers have finished
                     print('Regular objects uploaded. Waiting for LFS objects to be copied')
