@@ -325,6 +325,29 @@ def mirror_repos(mappings,
 
             trailer = read_bytes(20)
 
+    def upload_object(http_client, bucket, base_url, object_type, object_length, object_bytes):
+        binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
+        sha = sha1(binary_prefix)
+        temp_file_name =  f'{target_prefix}/mirror_tmp/1'
+        with_sha = yield_with_sha(object_bytes, sha)
+        with_lfs_check, is_lfs, lfs_pointer = yield_with_lfs(with_sha)
+        s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name)
+        sha_hex = sha.hexdigest()
+        s3_client.copy(CopySource={
+            'Bucket': bucket,
+            'Key': temp_file_name,
+        }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+        shas[sha.digest()] = (object_type, object_length)
+
+        # Upload in prefixed and compressed format to final location
+        resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+        s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+
+        if not is_lfs():
+            return
+        lfs_sha256, lfs_size = lfs_pointer()
+        lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size))
+
     def yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size):
         batch_response = http_client.post(base_url.removesuffix('.git') + '.git/info/lfs/objects/batch', json={
             'operation': 'download',
@@ -383,27 +406,7 @@ def mirror_repos(mappings,
 
             try:
                 for object_type, object_length, object_bytes in get_pack_objects(s3_client, http_client, bucket, target_prefix, source_base_url, refs, shas):
-                    binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
-                    sha = sha1(binary_prefix)
-                    temp_file_name =  f'{target_prefix}/mirror_tmp/1'
-                    with_sha = yield_with_sha(object_bytes, sha)
-                    with_lfs_check, is_lfs, lfs_pointer = yield_with_lfs(with_sha)
-                    s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name)
-                    sha_hex = sha.hexdigest()
-                    s3_client.copy(CopySource={
-                        'Bucket': bucket,
-                        'Key': temp_file_name,
-                    }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
-                    shas[sha.digest()] = (object_type, object_length)
-
-                    # Upload in prefixed and compressed format to final location
-                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
-                    s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
-
-                    if not is_lfs():
-                        continue
-                    lfs_sha256, lfs_size = lfs_pointer()
-                    lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, source_base_url, lfs_sha256, lfs_size))
+                    upload_object(http_client, bucket, source_base_url, object_type, object_length, object_bytes)
 
                 # Ensure all LFS workers have finished
                 print('Regular objects uploaded. Waiting for LFS objects to be copied')
