@@ -294,20 +294,7 @@ def mirror_repos(mappings,
             for line in lines[2:-1]
         ]
 
-    def get_pack_objects(s3_client, bucket, target_prefix, smoothed_bytes_iter, shas):
-        yield_indefinite, read_bytes, return_unused = get_reader(smoothed_bytes_iter)
-
-        length = int(read_bytes(4), 16)
-        chunk = read_bytes(length - 4)
-        assert chunk == b'NAK\n'
-
-        signature = read_bytes(4)
-        assert signature == b'PACK'
-        version, = unpack('>I', read_bytes(4))
-        assert version == 2
-
-        number_of_objects, = unpack('>I', read_bytes(4))
-
+    def get_pack_objects(s3_client, bucket, target_prefix, yield_indefinite, read_bytes, return_unused, shas):
         for i in range(0, number_of_objects):
             object_type, object_length = get_object_type_and_length(read_bytes)
             assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
@@ -404,7 +391,21 @@ def mirror_repos(mappings,
 
                 with http_client.stream('POST', f'{source_base_url}/git-upload-pack', content=pack_file_request) as response:
                     response.raise_for_status()
-                    for object_type, object_length, object_bytes in get_pack_objects(s3_client, bucket, target_prefix, smooth(response.iter_bytes(16384)), shas):
+
+                    yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
+
+                    length = int(read_bytes(4), 16)
+                    chunk = read_bytes(length - 4)
+                    assert chunk == b'NAK\n'
+
+                    signature = read_bytes(4)
+                    assert signature == b'PACK'
+                    version, = unpack('>I', read_bytes(4))
+                    assert version == 2
+
+                    number_of_objects, = unpack('>I', read_bytes(4))
+
+                    for object_type, object_length, object_bytes in get_pack_objects(s3_client, bucket, target_prefix, yield_indefinite, read_bytes, return_unused, shas):
                         upload_object(http_client, bucket, source_base_url, object_type, object_length, object_bytes)
 
                     # Ensure all LFS workers have finished
