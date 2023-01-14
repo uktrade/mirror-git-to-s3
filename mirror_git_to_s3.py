@@ -294,35 +294,28 @@ def mirror_repos(mappings,
             for line in lines[2:-1]
         ]
 
-    def get_pack_objects(s3_client, http_client, bucket, target_prefix, base_url, refs, shas):
-        pack_file_request = b''.join(
-            b'0032want ' + sha[4:] + b'\n'
-            for sha, ref in refs
-        ) + b'0000' + b'0009done\n'
+    def get_pack_objects(s3_client, bucket, target_prefix, smoothed_bytes_iter, shas):
+        yield_indefinite, read_bytes, return_unused = get_reader(smoothed_bytes_iter)
 
-        with http_client.stream('POST', f'{base_url}/git-upload-pack', content=pack_file_request) as response:
-            response.raise_for_status()
-            yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
+        length = int(read_bytes(4), 16)
+        chunk = read_bytes(length - 4)
+        assert chunk == b'NAK\n'
 
-            length = int(read_bytes(4), 16)
-            chunk = read_bytes(length - 4)
-            assert chunk == b'NAK\n'
+        signature = read_bytes(4)
+        assert signature == b'PACK'
+        version, = unpack('>I', read_bytes(4))
+        assert version == 2
 
-            signature = read_bytes(4)
-            assert signature == b'PACK'
-            version, = unpack('>I', read_bytes(4))
-            assert version == 2
+        number_of_objects, = unpack('>I', read_bytes(4))
 
-            number_of_objects, = unpack('>I', read_bytes(4))
+        for i in range(0, number_of_objects):
+            object_type, object_length = get_object_type_and_length(read_bytes)
+            assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
+            yield \
+                (object_type, object_length, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)) if object_type in (1, 2, 3, 4) else \
+                construct_object_from_ref_delta(s3_client, bucket, target_prefix, shas, base_sha=read_bytes(20), delta_bytes=yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length))
 
-            for i in range(0, number_of_objects):
-                object_type, object_length = get_object_type_and_length(read_bytes)
-                assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
-                yield \
-                    (object_type, object_length, yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)) if object_type in (1, 2, 3, 4) else \
-                    construct_object_from_ref_delta(s3_client, bucket, target_prefix, shas, base_sha=read_bytes(20), delta_bytes=yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length))
-
-            trailer = read_bytes(20)
+        trailer = read_bytes(20)
 
     def upload_object(http_client, bucket, base_url, object_type, object_length, object_bytes):
         binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
@@ -404,19 +397,26 @@ def mirror_repos(mappings,
             head_ref, refs = get_refs(http_client, source_base_url)
 
             try:
-                for object_type, object_length, object_bytes in get_pack_objects(s3_client, http_client, bucket, target_prefix, source_base_url, refs, shas):
-                    upload_object(http_client, bucket, source_base_url, object_type, object_length, object_bytes)
+                pack_file_request = b''.join(
+                    b'0032want ' + sha[4:] + b'\n'
+                    for sha, ref in refs
+                ) + b'0000' + b'0009done\n'
 
-                # Ensure all LFS workers have finished
-                print('Regular objects uploaded. Waiting for LFS objects to be copied')
-                for i in range(0, num_lfs_workers):
-                    lfs_queue.put(lfs_done)
-                for worker in lfs_workers:
-                    worker.join()
-                print('LFS objects uploaded')
+                with http_client.stream('POST', f'{source_base_url}/git-upload-pack', content=pack_file_request) as response:
+                    response.raise_for_status()
+                    for object_type, object_length, object_bytes in get_pack_objects(s3_client, bucket, target_prefix, smooth(response.iter_bytes(16384)), shas):
+                        upload_object(http_client, bucket, source_base_url, object_type, object_length, object_bytes)
 
-                s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
-                s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
+                    # Ensure all LFS workers have finished
+                    print('Regular objects uploaded. Waiting for LFS objects to be copied')
+                    for i in range(0, num_lfs_workers):
+                        lfs_queue.put(lfs_done)
+                    for worker in lfs_workers:
+                        worker.join()
+                    print('LFS objects uploaded')
+
+                    s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
+                    s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
             finally:
                 clear_tmp(s3_client, bucket, target_prefix)
 
