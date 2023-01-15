@@ -64,7 +64,7 @@ At the time of writing, there is no known standard way of discovering a set of a
 
 ## Under the hood
 
-The project requests a git packfile with all objects from each source, separates it into its component git objects, and stores each separately in S3 as an S3 object.
+The project requests a [git packfile](https://git-scm.com/book/en/v2/Git-Internals-Packfiles) with all objects from each source, separates it into its component [git objects](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects), and stores each separately in S3 as an S3 object.
 
 - The packfile is requested via a single POST request. Its response is stream-processed to avoid loading it all into memory at once.
 - An attempt is made to split processing of the response into separate threads where possible. Stream processing is somewhat at-odds with parallel processing, but there are still parts that can be moved to separate threads.
