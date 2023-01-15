@@ -60,3 +60,13 @@ mirror-git-to-s3 \
 ```
 
 At the time of writing, there is no known standard way of discovering a set of associated git repositories, hence to remain general, this project must be told the source and target addresses of each repository explicitly.
+
+
+## Under the hood
+
+The project essentially unpacks the git packfile from each source into separate git objects, and stores each separately in S3 as an S3 object.
+
+- The packfile is requested via a single POST request. Its response is stream-processed to avoid loading it all into memory at once.
+- An attempt is made to split processing of the response into separate threads where possible. Stream processing is somewhat at-odds with parallel processing, but there are still parts that can be moved to separate threads.
+- Where parallism is not possible, for example when a delta object in the packfile has to wait for its base object, a [threading.Event](https://docs.python.org/3/library/threading.html#event-objects) is used for the thread to wait.
+- So far a deadlock has not been observed, but this depends on the packfile being returned in an order where base objects are always before the deltas that depend on them.
