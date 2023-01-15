@@ -73,7 +73,6 @@ def mirror_repos(mappings,
         queue = SimpleQueue()
         lock = Lock()
         amount_in_queue = 0
-        done = object()
 
         def pull():
             nonlocal amount_in_queue, fetch_next, thread_exception
@@ -237,7 +236,7 @@ def mirror_repos(mappings,
 
         return _to_yield(), _is_lfs, _lfs_pointer
 
-    def queue_to_iterable(queue, done):
+    def queue_to_iterable(queue):
         while value := queue.get():
             if value is done:
                 break
@@ -353,7 +352,7 @@ def mirror_repos(mappings,
         s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256)
         print('Uploaded', lfs_sha256, lfs_size)
 
-    def worker_func(q, done):
+    def worker_func(q):
         while item := q.get():
             try:
                 if item is done:
@@ -364,6 +363,7 @@ def mirror_repos(mappings,
             finally:
                 q.task_done()
 
+    done = object()
     types_names_for_hash = {
         1: b'commit',
         2: b'tree',
@@ -377,14 +377,12 @@ def mirror_repos(mappings,
         for source_base_url, target in mappings:
             # Process objects and LFS files in separate threads so (when possible) to minimise blocking
             object_queue = Queue(maxsize=1)
-            object_done = object()
-            object_workers = [Thread(target=worker_func, args=(object_queue, object_done)) for _ in range(0, num_object_workers)]
+            object_workers = [Thread(target=worker_func, args=(object_queue,)) for _ in range(0, num_object_workers)]
             for worker in object_workers:
                 worker.start()
 
             lfs_queue = Queue(maxsize=lfs_queue_size)
-            lfs_done = object()
-            lfs_workers = [Thread(target=worker_func, args=(lfs_queue, lfs_done)) for _ in range(0, num_lfs_workers)]
+            lfs_workers = [Thread(target=worker_func, args=(lfs_queue,)) for _ in range(0, num_lfs_workers)]
             for worker in lfs_workers:
                 worker.start()
 
@@ -428,28 +426,27 @@ def mirror_repos(mappings,
 
                         uncompressed = yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
                         object_bytes_queue = Queue(maxsize=1)
-                        object_bytes_done = object()
 
                         object_queue.put(
-                            partial(upload_object, http_client, bucket, source_base_url, object_type, object_length, sha_lock, sha_events, shas, object_bytes=queue_to_iterable(object_bytes_queue, object_bytes_done)) if object_type in (1, 2, 3, 4) else \
-                            partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue, object_bytes_done))
+                            partial(upload_object, http_client, bucket, source_base_url, object_type, object_length, sha_lock, sha_events, shas, object_bytes=queue_to_iterable(object_bytes_queue,)) if object_type in (1, 2, 3, 4) else \
+                            partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue,))
                         )
                         for chunk in uncompressed:
                             object_bytes_queue.put(chunk)
-                        object_bytes_queue.put(object_bytes_done)
+                        object_bytes_queue.put(done)
 
                     trailer = read_bytes(20)
 
                     print('Waiting for regular objects to be uploaded')
                     for i in range(0, num_object_workers):
-                        object_queue.put(object_done)
+                        object_queue.put(done)
                     for worker in object_workers:
                         worker.join()
 
                     # Ensure all LFS workers have finished
                     print('Regular objects uploaded. Waiting for LFS objects to be copied')
                     for i in range(0, num_lfs_workers):
-                        lfs_queue.put(lfs_done)
+                        lfs_queue.put(done)
                     for worker in lfs_workers:
                         worker.join()
                     print('LFS objects uploaded')
