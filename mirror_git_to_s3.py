@@ -243,51 +243,6 @@ def mirror_repos(mappings,
                 break
             yield value
 
-    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, base_sha, delta_bytes):
-        yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
-        base_size = get_length(read_bytes)
-        target_size = get_length(read_bytes)
-
-        def read_sparse(instruction, instruction_bit_range):
-            value = 0
-            factor = 0
-            for b in instruction_bit_range:
-                has = (instruction >> b) & 1
-                if has:
-                    value += read_bytes(1)[0] << factor
-                factor += 8
-            return value
-
-        def yield_object_bytes():
-            target_size_remaining = target_size
-            while target_size_remaining:
-                instruction = read_bytes(1)[0]
-                assert instruction != 0
-                if instruction >> 7:
-                    offset = read_sparse(instruction, range(0, 4))
-                    size = read_sparse(instruction, range(4, 7)) or 65536
-                    sha_hex = base_sha.hex()
-                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
-                    target_size_remaining -= size
-                    yield from yield_with_asserted_length(resp['Body'], size)
-                else:
-                    size = instruction & 127
-                    target_size_remaining -= size
-                    yield from yield_indefinite(size)
-
-            # Not expecting any bytes - this is to exhaust the iterator to put back bytes after zlib
-            for _ in delta_bytes:
-                pass
-
-        # Wait to make sure the base object has been uploaded
-        with sha_lock:
-            sha_event = sha_events[base_sha]
-        sha_event.wait()
-        with sha_lock:
-            object_type = shas[base_sha]
-
-        upload_object(http_client, bucket, base_url, object_type, target_size, sha_lock, sha_events, shas, yield_object_bytes())
-
     def clear_tmp(s3_client, bucket, target_prefix):
         paginator = s3_client.get_paginator('list_objects_v2')
         for page in paginator.paginate(Bucket=bucket, Prefix=f'{target_prefix}/mirror_tmp/'):
@@ -335,6 +290,51 @@ def mirror_repos(mappings,
             return
         lfs_sha256, lfs_size = lfs_pointer()
         lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size))
+
+    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, base_sha, delta_bytes):
+        yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
+        base_size = get_length(read_bytes)
+        target_size = get_length(read_bytes)
+
+        def read_sparse(instruction, instruction_bit_range):
+            value = 0
+            factor = 0
+            for b in instruction_bit_range:
+                has = (instruction >> b) & 1
+                if has:
+                    value += read_bytes(1)[0] << factor
+                factor += 8
+            return value
+
+        def yield_object_bytes():
+            target_size_remaining = target_size
+            while target_size_remaining:
+                instruction = read_bytes(1)[0]
+                assert instruction != 0
+                if instruction >> 7:
+                    offset = read_sparse(instruction, range(0, 4))
+                    size = read_sparse(instruction, range(4, 7)) or 65536
+                    sha_hex = base_sha.hex()
+                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
+                    target_size_remaining -= size
+                    yield from yield_with_asserted_length(resp['Body'], size)
+                else:
+                    size = instruction & 127
+                    target_size_remaining -= size
+                    yield from yield_indefinite(size)
+
+            # Not expecting any bytes - this is to exhaust the iterator to put back bytes after zlib
+            for _ in delta_bytes:
+                pass
+
+        # Wait to make sure the base object has been uploaded
+        with sha_lock:
+            sha_event = sha_events[base_sha]
+        sha_event.wait()
+        with sha_lock:
+            object_type = shas[base_sha]
+
+        upload_object(http_client, bucket, base_url, object_type, target_size, sha_lock, sha_events, shas, yield_object_bytes())
 
     def yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size):
         batch_response = http_client.post(base_url.removesuffix('.git') + '.git/info/lfs/objects/batch', json={
