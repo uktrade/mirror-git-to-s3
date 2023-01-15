@@ -320,15 +320,16 @@ def mirror_repos(mappings,
             'Bucket': bucket,
             'Key': temp_file_name,
         }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+
+        with sha_lock:
+            shas[sha.digest()] = object_type
+            sha_events[sha.digest()].set()
+
         s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
 
         # Upload in prefixed and compressed format to final location
         resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
         s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
-
-        with sha_lock:
-            shas[sha.digest()] = object_type
-            sha_events[sha.digest()].set()
 
         if not is_lfs():
             return
