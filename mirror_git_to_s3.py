@@ -349,6 +349,14 @@ def mirror_repos(mappings,
     def upload_lfs(s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size):
         print('Uploading LFS', lfs_sha256, lfs_size)
         key = f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256
+        try:
+            s3_client.head_object(Bucket=bucket, Key=key)
+        except s3_client.exceptions.ClientError as e:
+            if e.response['Error']['Code'] != '404':
+                raise
+        else:
+            print('LFS exists, skipping', lfs_sha256)
+            return
         lfs_data = yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size)
         s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=key)
         print('Uploaded', lfs_sha256, lfs_size)
