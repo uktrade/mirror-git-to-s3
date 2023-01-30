@@ -348,8 +348,9 @@ def mirror_repos(mappings,
 
     def upload_lfs(s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size):
         print('Uploading LFS', lfs_sha256, lfs_size)
+        key = f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256
         lfs_data = yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size)
-        s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256)
+        s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=key)
         print('Uploaded', lfs_sha256, lfs_size)
 
     def worker_func(q):
