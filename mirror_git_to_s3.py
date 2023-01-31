@@ -262,7 +262,7 @@ def mirror_repos(mappings,
             for line in lines[2:-1]
         ]
 
-    def upload_object(http_client, bucket, base_url, object_type, object_length, sha_lock, sha_events, shas, object_bytes):
+    def upload_object(http_client, bucket, base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_queue, object_bytes):
         binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
         sha = sha1(binary_prefix)
         temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
@@ -290,7 +290,7 @@ def mirror_repos(mappings,
         lfs_sha256, lfs_size = lfs_pointer()
         lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size))
 
-    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, base_sha, delta_bytes):
+    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, lfs_queue, base_sha, delta_bytes):
         yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
         base_size = get_length(read_bytes)
         target_size = get_length(read_bytes)
@@ -333,7 +333,7 @@ def mirror_repos(mappings,
         with sha_lock:
             object_type = shas[base_sha]
 
-        upload_object(http_client, bucket, base_url, object_type, target_size, sha_lock, sha_events, shas, yield_object_bytes())
+        upload_object(http_client, bucket, base_url, target_prefix, object_type, target_size, sha_lock, sha_events, shas, lfs_queue, yield_object_bytes())
 
     def yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size):
         batch_response = http_client.post(base_url.removesuffix('.git') + '.git/info/lfs/objects/batch', json={
@@ -372,7 +372,90 @@ def mirror_repos(mappings,
             finally:
                 q.task_done()
 
+    def mirror_repo(s3_client, http_client, source_base_url, target):
+        # Process objects and LFS files in separate threads so (when possible) to minimise blocking
+        object_queue = Queue(maxsize=1)
+        object_workers = [Thread(target=worker_func, args=(object_queue,)) for _ in range(0, num_object_workers)]
+        for worker in object_workers:
+            worker.start()
+
+        lfs_queue = Queue(maxsize=lfs_queue_size)
+        lfs_workers = [Thread(target=worker_func, args=(lfs_queue,)) for _ in range(0, num_lfs_workers)]
+        for worker in lfs_workers:
+            worker.start()
+
+        sha_lock = Lock()
+        sha_events = defaultdict(Event)
+        shas = {}
+
+        parsed_target = urllib.parse.urlparse(target)
+        assert parsed_target.scheme == 's3'
+        bucket = parsed_target.netloc
+        target_prefix = parsed_target.path[1:] # Remove leading /
+        clear_tmp(s3_client, bucket, target_prefix)
+
+        head_ref, refs = get_refs(http_client, source_base_url)
+
+        try:
+            pack_file_request = b''.join(
+                b'0032want ' + sha[4:] + b'\n'
+                for sha, ref in refs
+            ) + b'0000' + b'0009done\n'
+
+            with http_client.stream('POST', f'{source_base_url}/git-upload-pack', content=pack_file_request) as response:
+                response.raise_for_status()
+
+                yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
+
+                length = int(read_bytes(4), 16)
+                chunk = read_bytes(length - 4)
+                assert chunk == b'NAK\n'
+
+                signature = read_bytes(4)
+                assert signature == b'PACK'
+                version, = unpack('>I', read_bytes(4))
+                assert version == 2
+
+                number_of_objects, = unpack('>I', read_bytes(4))
+
+                for i in range(0, number_of_objects):
+                    object_type, object_length = get_object_type_and_length(read_bytes)
+                    assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
+
+                    uncompressed = yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
+                    object_bytes_queue = Queue(maxsize=1)
+
+                    object_queue.put(
+                        partial(upload_object, http_client, bucket, source_base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_queue, object_bytes=queue_to_iterable(object_bytes_queue,)) if object_type in (1, 2, 3, 4) else \
+                        partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, lfs_queue, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue,))
+                    )
+                    for chunk in uncompressed:
+                        object_bytes_queue.put(chunk)
+                    object_bytes_queue.put(done)
+
+                trailer = read_bytes(20)
+
+                print('Waiting for regular objects to be uploaded')
+                for i in range(0, num_object_workers):
+                    object_queue.put(done)
+                for worker in object_workers:
+                    worker.join()
+
+                # Ensure all LFS workers have finished
+                print('Regular objects uploaded. Waiting for LFS objects to be copied')
+                for i in range(0, num_lfs_workers):
+                    lfs_queue.put(done)
+                for worker in lfs_workers:
+                    worker.join()
+                print('LFS objects uploaded')
+
+                s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
+                s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
+        finally:
+            clear_tmp(s3_client, bucket, target_prefix)
+
     done = object()
+
     types_names_for_hash = {
         1: b'commit',
         2: b'tree',
@@ -384,86 +467,7 @@ def mirror_repos(mappings,
 
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
-            # Process objects and LFS files in separate threads so (when possible) to minimise blocking
-            object_queue = Queue(maxsize=1)
-            object_workers = [Thread(target=worker_func, args=(object_queue,)) for _ in range(0, num_object_workers)]
-            for worker in object_workers:
-                worker.start()
-
-            lfs_queue = Queue(maxsize=lfs_queue_size)
-            lfs_workers = [Thread(target=worker_func, args=(lfs_queue,)) for _ in range(0, num_lfs_workers)]
-            for worker in lfs_workers:
-                worker.start()
-
-            sha_lock = Lock()
-            sha_events = defaultdict(Event)
-            shas = {}
-
-            parsed_target = urllib.parse.urlparse(target)
-            assert parsed_target.scheme == 's3'
-            bucket = parsed_target.netloc
-            target_prefix = parsed_target.path[1:] # Remove leading /
-            clear_tmp(s3_client, bucket, target_prefix)
-
-            head_ref, refs = get_refs(http_client, source_base_url)
-
-            try:
-                pack_file_request = b''.join(
-                    b'0032want ' + sha[4:] + b'\n'
-                    for sha, ref in refs
-                ) + b'0000' + b'0009done\n'
-
-                with http_client.stream('POST', f'{source_base_url}/git-upload-pack', content=pack_file_request) as response:
-                    response.raise_for_status()
-
-                    yield_indefinite, read_bytes, return_unused = get_reader(smooth(response.iter_bytes(16384)))
-
-                    length = int(read_bytes(4), 16)
-                    chunk = read_bytes(length - 4)
-                    assert chunk == b'NAK\n'
-
-                    signature = read_bytes(4)
-                    assert signature == b'PACK'
-                    version, = unpack('>I', read_bytes(4))
-                    assert version == 2
-
-                    number_of_objects, = unpack('>I', read_bytes(4))
-
-                    for i in range(0, number_of_objects):
-                        object_type, object_length = get_object_type_and_length(read_bytes)
-                        assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
-
-                        uncompressed = yield_with_asserted_length(uncompress_zlib(yield_indefinite, return_unused), object_length)
-                        object_bytes_queue = Queue(maxsize=1)
-
-                        object_queue.put(
-                            partial(upload_object, http_client, bucket, source_base_url, object_type, object_length, sha_lock, sha_events, shas, object_bytes=queue_to_iterable(object_bytes_queue,)) if object_type in (1, 2, 3, 4) else \
-                            partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue,))
-                        )
-                        for chunk in uncompressed:
-                            object_bytes_queue.put(chunk)
-                        object_bytes_queue.put(done)
-
-                    trailer = read_bytes(20)
-
-                    print('Waiting for regular objects to be uploaded')
-                    for i in range(0, num_object_workers):
-                        object_queue.put(done)
-                    for worker in object_workers:
-                        worker.join()
-
-                    # Ensure all LFS workers have finished
-                    print('Regular objects uploaded. Waiting for LFS objects to be copied')
-                    for i in range(0, num_lfs_workers):
-                        lfs_queue.put(done)
-                    for worker in lfs_workers:
-                        worker.join()
-                    print('LFS objects uploaded')
-
-                    s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
-                    s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
-            finally:
-                clear_tmp(s3_client, bucket, target_prefix)
+            mirror_repo(s3_client, http_client, source_base_url, target)
 
     print('End')
 
