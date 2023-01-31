@@ -465,9 +465,19 @@ def mirror_repos(mappings,
 
     s3_client = get_s3_client()
 
+    first_exception = None
+
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
-            mirror_repo(s3_client, http_client, source_base_url, target)
+            try:
+                mirror_repo(s3_client, http_client, source_base_url, target)
+            except Exception as e:
+                print('Failed mirroring', source_base_url, 'to', target, 'with', e, 'but carrying on')
+                if first_exception is None:
+                    first_exception = e
+
+    if first_exception is not None:
+        raise first_exception
 
     print('End')
 
