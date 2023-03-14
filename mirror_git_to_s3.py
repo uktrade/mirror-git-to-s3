@@ -388,15 +388,15 @@ def mirror_repos(mappings,
         sha_events = defaultdict(Event)
         shas = {}
 
-        parsed_target = urllib.parse.urlparse(target)
-        assert parsed_target.scheme == 's3'
-        bucket = parsed_target.netloc
-        target_prefix = parsed_target.path[1:] # Remove leading /
-        clear_tmp(s3_client, bucket, target_prefix)
-
-        head_ref, refs = get_refs(http_client, source_base_url)
-
         try:
+            parsed_target = urllib.parse.urlparse(target)
+            assert parsed_target.scheme == 's3'
+            bucket = parsed_target.netloc
+            target_prefix = parsed_target.path[1:] # Remove leading /
+            clear_tmp(s3_client, bucket, target_prefix)
+
+            head_ref, refs = get_refs(http_client, source_base_url)
+
             pack_file_request = b''.join(
                 b'0032want ' + sha[4:] + b'\n'
                 for sha, ref in refs
@@ -434,25 +434,25 @@ def mirror_repos(mappings,
                     object_bytes_queue.put(done)
 
                 trailer = read_bytes(20)
-
-                print('Waiting for regular objects to be uploaded')
-                for i in range(0, num_object_workers):
-                    object_queue.put(done)
-                for worker in object_workers:
-                    worker.join()
-
-                # Ensure all LFS workers have finished
-                print('Regular objects uploaded. Waiting for LFS objects to be copied')
-                for i in range(0, num_lfs_workers):
-                    lfs_queue.put(done)
-                for worker in lfs_workers:
-                    worker.join()
-                print('LFS objects uploaded')
-
-                s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
-                s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
         finally:
-            clear_tmp(s3_client, bucket, target_prefix)
+            print('Waiting for regular objects to be uploaded')
+            for i in range(0, num_object_workers):
+                object_queue.put(done)
+            for worker in object_workers:
+                worker.join()
+
+            # Ensure all LFS workers have finished
+            print('Regular objects uploaded. Waiting for LFS objects to be copied')
+            for i in range(0, num_lfs_workers):
+                lfs_queue.put(done)
+            for worker in lfs_workers:
+                worker.join()
+            print('LFS objects uploaded')
+
+        s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
+        s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
+ 
+        clear_tmp(s3_client, bucket, target_prefix)
 
     done = object()
 
