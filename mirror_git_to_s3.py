@@ -477,7 +477,7 @@ def mirror_repos(mappings,
             try:
                 mirror_repo(s3_client, http_client, source_base_url, target)
             except Exception as e:
-                logger.exception('Failed mirroring %s to %s but carrying on', source_base_url, 'to', target)
+                logger.exception('Failed mirroring %s to %s but carrying on', source_base_url, target)
                 if first_exception is None:
                     first_exception = e
             logger.info('Finished %s to %s', source_base_url, target)
