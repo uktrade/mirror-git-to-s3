@@ -1,4 +1,5 @@
 import itertools
+import logging
 import re
 import zlib
 import uuid
@@ -13,6 +14,9 @@ from threading import Lock, Event, Thread
 import boto3
 import click
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 def mirror_repos(mappings,
@@ -91,7 +95,7 @@ def mirror_repos(mappings,
                         amount_in_queue += len_chunk
                         to_report = amount_in_queue  # To not print when holding the lock
                     if not regular:
-                        print('Forced fetch to avoid HTTP timeout on server. In queue:', to_report)
+                        logger.warning('Forced fetch to avoid HTTP timeout on server. In queue: %s', to_report)
                     queue.put(chunk)
                     chunk = None
             except Exception as e:
@@ -347,7 +351,7 @@ def mirror_repos(mappings,
             yield from bytes_response.iter_bytes()
 
     def upload_lfs(s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size):
-        print('Uploading LFS', lfs_sha256, lfs_size)
+        logger.debug('Uploading LFS %s %s', lfs_sha256, lfs_size)
         key = f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256
         try:
             s3_client.head_object(Bucket=bucket, Key=key)
@@ -355,11 +359,11 @@ def mirror_repos(mappings,
             if e.response['Error']['Code'] != '404':
                 raise
         else:
-            print('LFS exists, skipping', lfs_sha256)
+            logger.debug('LFS exists, skipping %s', lfs_sha256)
             return
         lfs_data = yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size)
         s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=key)
-        print('Uploaded', lfs_sha256, lfs_size)
+        logger.debug('Uploaded %s %s', lfs_sha256, lfs_size)
 
     def worker_func(q):
         while item := q.get():
@@ -368,7 +372,7 @@ def mirror_repos(mappings,
                     break
                 item()
             except Exception as e:
-                print('Exception in thread', e)
+                logger.exception('Exception in thread')
             finally:
                 q.task_done()
 
@@ -435,19 +439,19 @@ def mirror_repos(mappings,
 
                 trailer = read_bytes(20)
         finally:
-            print('Waiting for regular objects to be uploaded')
+            logger.info('Waiting for regular objects to be uploaded')
             for i in range(0, num_object_workers):
                 object_queue.put(done)
             for worker in object_workers:
                 worker.join()
 
             # Ensure all LFS workers have finished
-            print('Regular objects uploaded. Waiting for LFS objects to be copied')
+            logger.info('Regular objects uploaded. Waiting for LFS objects to be copied')
             for i in range(0, num_lfs_workers):
                 lfs_queue.put(done)
             for worker in lfs_workers:
                 worker.join()
-            print('LFS objects uploaded')
+            logger.info('LFS objects uploaded')
 
         s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
         s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
@@ -469,17 +473,19 @@ def mirror_repos(mappings,
 
     with get_http_client() as http_client:
         for source_base_url, target in mappings:
+            logger.info('Starting %s to %s', source_base_url, target)
             try:
                 mirror_repo(s3_client, http_client, source_base_url, target)
             except Exception as e:
-                print('Failed mirroring', source_base_url, 'to', target, 'with', e, 'but carrying on')
+                logger.exception('Failed mirroring %s to %s but carrying on', source_base_url, 'to', target)
                 if first_exception is None:
                     first_exception = e
+            logger.info('Finished %s to %s', source_base_url, target)
 
     if first_exception is not None:
         raise first_exception
 
-    print('End')
+    logger.info('End')
 
 
 @click.command()
