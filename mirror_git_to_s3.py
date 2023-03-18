@@ -272,22 +272,36 @@ def mirror_repos(mappings,
         temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
         with_sha = yield_with_sha(object_bytes, sha)
         with_lfs_check, is_lfs, lfs_pointer = yield_with_lfs(with_sha)
-        s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name)
-        sha_hex = sha.hexdigest()
-        s3_client.copy(CopySource={
-            'Bucket': bucket,
-            'Key': temp_file_name,
-        }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
 
-        with sha_lock:
-            shas[sha.digest()] = object_type
-            sha_events[sha.digest()].set()
+        if object_length < 65536:
+            all_bytes = b''.join(with_lfs_check)
+            sha_hex = sha.hexdigest()
+            s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Body=all_bytes)
 
-        s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
+            with sha_lock:
+                shas[sha.digest()] = object_type
+                sha_events[sha.digest()].set()
 
-        # Upload in prefixed and compressed format to final location
-        resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
-        s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+            compressed_and_prefixed = b''.join(compress_zlib(itertools.chain((binary_prefix,), (all_bytes,))))
+            s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', Body=compressed_and_prefixed)
+        else:
+            temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
+            s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name)
+            sha_hex = sha.hexdigest()
+            s3_client.copy(CopySource={
+                'Bucket': bucket,
+                'Key': temp_file_name,
+            }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+
+            with sha_lock:
+                shas[sha.digest()] = object_type
+                sha_events[sha.digest()].set()
+
+            s3_client.delete_object(Bucket=bucket, Key=temp_file_name)
+
+            # Upload in prefixed and compressed format to final location
+            resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+            s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
 
         if not is_lfs():
             return
