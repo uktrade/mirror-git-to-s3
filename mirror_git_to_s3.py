@@ -350,7 +350,8 @@ def mirror_repos(mappings,
                             cache_c_start = cache_b_start
                             cache_b = cache_a
                             cache_b_start = cache_a_start
-                            cache_a_start = max(offset - 32768, 0)
+                            middle = offset + (size // 2)
+                            cache_a_start = max(middle - 32768, 0)
                             provisional_cache_end = cache_a_start + 65536
                             resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(cache_a_start, provisional_cache_end - 1))
                             cache_a = resp['Body'].read()
