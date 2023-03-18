@@ -4,7 +4,7 @@ import re
 import zlib
 import uuid
 import urllib.parse
-from collections import defaultdict
+from collections import defaultdict, deque
 from functools import partial
 from hashlib import sha1
 from queue import SimpleQueue, Queue
@@ -325,14 +325,12 @@ def mirror_repos(mappings,
             return value
 
         def yield_object_bytes():
-            # Latency to S3 is quite high, so we cache chunks of the base object to avoid lots of small fetches
-            # We use a basic LIFO cache to cache multiple regions from the base file
-            cache_a_start = 0
-            cache_a = b''
-            cache_b_start = 0
-            cache_b = b''
-            cache_c_start = 0
-            cache_c = b''
+            # Latency to S3 is quite high, so we cache chunks of the base object in an LRU cache
+            # to avoid lots of small fetches
+            caches = deque((
+                (0, '')
+                for _ in range(0, 16)
+            ))
 
             target_size_remaining = target_size
             while target_size_remaining:
@@ -350,21 +348,12 @@ def mirror_repos(mappings,
                         target_size_remaining -= size
                         yield from yield_with_asserted_length(resp['Body'], size)
                     else:
-                        if (cache_a_start <= offset and offset + size < cache_a_start + len(cache_a)):
-                            cache_start = cache_a_start
-                            cache = cache_a
-                        elif (cache_b_start <= offset and offset + size < cache_b_start + len(cache_b)):
-                            cache_start = cache_b_start
-                            cache = cache_b
-                        elif (cache_c_start <= offset and offset + size < cache_c_start + len(cache_c)):
-                            cache_start = cache_c_start
-                            cache = cache_c
+                        for i, (cache_start, cache) in enumerate(caches):
+                            if cache_start <= offset and offset + size < cache_start + len(cache):
+                                del caches[i]
+                                caches.appendleft((cache_start, cache))
+                                break
                         else:
-                            # Cache C -> out, Cache B -> Cache C, and populate Cache A
-                            cache_c = cache_b
-                            cache_c_start = cache_b_start
-                            cache_b = cache_a
-                            cache_b_start = cache_a_start
                             middle = offset + (size // 2)
                             cache_a_start = max(middle - 32768, 0)
                             provisional_cache_end = cache_a_start + 65536
@@ -372,6 +361,8 @@ def mirror_repos(mappings,
                             cache_a = resp['Body'].read()
                             cache_start = cache_a_start
                             cache = cache_a
+                            caches.pop()
+                            caches.appendleft((cache_start, cache))
 
                         target_size_remaining -= size
                         assert len(cache[offset - cache_start:offset - cache_start + size]) == size
@@ -477,7 +468,8 @@ def mirror_repos(mappings,
 
                 number_of_objects, = unpack('>I', read_bytes(4))
 
-                for i in tqdm(range(0, number_of_objects), desc=target, unit='obj'):
+                #for i in tqdm(range(0, number_of_objects), desc=target, unit='obj'):
+                for i in range(0, number_of_objects):
                     object_type, object_length = get_object_type_and_length(read_bytes)
                     assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
 
