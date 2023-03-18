@@ -310,6 +310,15 @@ def mirror_repos(mappings,
             return value
 
         def yield_object_bytes():
+            # Latency to S3 is quite high, so we cache chunks of the base object to avoid lots of small fetches
+            # We use a basic LIFO cache to cache multiple regions from the base file
+            cache_a_start = 0
+            cache_a = b''
+            cache_b_start = 0
+            cache_b = b''
+            cache_c_start = 0
+            cache_c = b''
+
             target_size_remaining = target_size
             while target_size_remaining:
                 instruction = read_bytes(1)[0]
@@ -318,9 +327,39 @@ def mirror_repos(mappings,
                     offset = read_sparse(instruction, range(0, 4))
                     size = read_sparse(instruction, range(4, 7)) or 65536
                     sha_hex = base_sha.hex()
-                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
-                    target_size_remaining -= size
-                    yield from yield_with_asserted_length(resp['Body'], size)
+
+                    if size >= 65536:
+                        # If the size is bigger than 64KiB, we don't cache and just stream
+                        # - this is actually quite rare for source code
+                        resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
+                        target_size_remaining -= size
+                        yield from yield_with_asserted_length(resp['Body'], size)
+                    else:
+                        if (cache_a_start <= offset and offset + size < cache_a_start + len(cache_a)):
+                            cache_start = cache_a_start
+                            cache = cache_a
+                        elif (cache_b_start <= offset and offset + size < cache_b_start + len(cache_b)):
+                            cache_start = cache_b_start
+                            cache = cache_b
+                        elif (cache_c_start <= offset and offset + size < cache_c_start + len(cache_c)):
+                            cache_start = cache_c_start
+                            cache = cache_c
+                        else:
+                            # Cache C -> out, Cache B -> Cache C, and populate Cache A
+                            cache_c = cache_b
+                            cache_c_start = cache_b_start
+                            cache_b = cache_a
+                            cache_b_start = cache_a_start
+                            cache_a_start = max(offset - 32768, 0)
+                            provisional_cache_end = cache_a_start + 65536
+                            resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(cache_a_start, provisional_cache_end - 1))
+                            cache_a = resp['Body'].read()
+                            cache_start = cache_a_start
+                            cache = cache_a
+
+                        target_size_remaining -= size
+                        assert len(cache[offset - cache_start:offset - cache_start + size]) == size
+                        yield cache[offset - cache_start:offset - cache_start + size]
                 else:
                     size = instruction & 127
                     target_size_remaining -= size
