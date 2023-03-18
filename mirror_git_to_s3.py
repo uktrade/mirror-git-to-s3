@@ -14,6 +14,7 @@ from threading import Lock, Event, Thread
 import boto3
 import click
 import httpx
+from tqdm import tqdm
 
 
 logger = logging.getLogger(__name__)
@@ -476,7 +477,7 @@ def mirror_repos(mappings,
 
                 number_of_objects, = unpack('>I', read_bytes(4))
 
-                for i in range(0, number_of_objects):
+                for i in tqdm(range(0, number_of_objects), desc=target, unit='obj'):
                     object_type, object_length = get_object_type_and_length(read_bytes)
                     assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
 
