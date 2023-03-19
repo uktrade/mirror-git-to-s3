@@ -236,8 +236,15 @@ def mirror_repos(mappings,
             return lfs_pointer_raw[:len(search_for)] == search_for
 
         def _lfs_pointer():
-            lines = lfs_pointer_raw.splitlines()
-            return lines[1].split(b':')[1].decode(), int(lines[2].split()[1].decode())
+            lfs_sha256 = None
+            lfs_size = None
+            for line in lfs_pointer_raw.splitlines():
+                key, value = line.split(b' ')
+                if key == b'oid':
+                    lfs_sha256 = line.split(b':')[1].decode()
+                if key == b'size':
+                    lfs_size = int(value.decode())
+            return lfs_sha256, lfs_size
 
         return _to_yield(), _is_lfs, _lfs_pointer
 
