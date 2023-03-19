@@ -381,8 +381,7 @@ def mirror_repos(mappings,
                     caches.appendleft((cache_start, cache))
 
                 target_size_remaining -= size
-                assert len(cache[offset - cache_start:offset - cache_start + size]) == size
-                yield cache[offset - cache_start:offset - cache_start + size]
+                yield from yield_with_asserted_length((cache[offset - cache_start:offset - cache_start + size],), size)
 
             # Not expecting any bytes - this is to exhaust the iterator to put back bytes after zlib
             for _ in delta_bytes:
