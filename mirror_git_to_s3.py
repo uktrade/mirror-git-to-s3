@@ -96,7 +96,7 @@ def mirror_repos(mappings,
                         amount_in_queue += len_chunk
                         to_report = amount_in_queue  # To not print when holding the lock
                     if not regular:
-                        logger.warning('Forced fetch to avoid HTTP timeout on server. In queue: %s', to_report)
+                        logger.info('Forced fetch to avoid HTTP timeout on server. In queue: %s', to_report)
                     queue.put(chunk)
                     chunk = None
             except Exception as e:
