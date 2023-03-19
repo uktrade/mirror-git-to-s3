@@ -274,7 +274,7 @@ def mirror_repos(mappings,
             for line in lines[2:-1]
         ]
 
-    def upload_object(http_client, bucket, base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, object_bytes):
+    def upload_object(http_client, bucket, base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, object_bar, lfs_bar, lfs_bar_lock, lfs_queue, object_bytes):
         binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
         sha = sha1(binary_prefix)
         temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
@@ -311,6 +311,8 @@ def mirror_repos(mappings,
             resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
             s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
 
+        object_bar.update(1)
+
         if not is_lfs():
             return
         lfs_sha256, lfs_size = lfs_pointer()
@@ -318,7 +320,7 @@ def mirror_repos(mappings,
             lfs_bar.total = (lfs_bar.total or 0) + lfs_size
         lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, base_url, lfs_bar, lfs_sha256, lfs_size))
 
-    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, base_sha, delta_bytes):
+    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, object_bar, lfs_bar, lfs_bar_lock, lfs_queue, base_sha, delta_bytes):
         yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
         base_size = get_length(read_bytes)
         target_size = get_length(read_bytes)
@@ -396,7 +398,7 @@ def mirror_repos(mappings,
         with sha_lock:
             object_type = shas[base_sha]
 
-        upload_object(http_client, bucket, base_url, target_prefix, object_type, target_size, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, yield_object_bytes())
+        upload_object(http_client, bucket, base_url, target_prefix, object_type, target_size, sha_lock, sha_events, shas, object_bar, lfs_bar, lfs_bar_lock, lfs_queue, yield_object_bytes())
 
     def yield_lfs_data(http_client, bucket, base_url, lfs_bar, lfs_sha256, lfs_size):
         batch_response = http_client.post(base_url.removesuffix('.git') + '.git/info/lfs/objects/batch', json={
@@ -521,13 +523,12 @@ def mirror_repos(mappings,
                     object_bytes_queue = Queue(maxsize=1)
 
                     object_queue.put(
-                        partial(upload_object, http_client, bucket, source_base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, object_bytes=queue_to_iterable(object_bytes_queue,)) if object_type in (1, 2, 3, 4) else \
-                        partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue,))
+                        partial(upload_object, http_client, bucket, source_base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, object_bar, lfs_bar, lfs_bar_lock, lfs_queue, object_bytes=queue_to_iterable(object_bytes_queue,)) if object_type in (1, 2, 3, 4) else \
+                        partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, object_bar, lfs_bar, lfs_bar_lock, lfs_queue, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue,))
                     )
                     for chunk in uncompressed:
                         object_bytes_queue.put(chunk)
                     object_bytes_queue.put(done)
-                    object_bar.update(1)
 
                 trailer = read_bytes(20)
         finally:
