@@ -274,7 +274,7 @@ def mirror_repos(mappings,
             for line in lines[2:-1]
         ]
 
-    def upload_object(http_client, bucket, base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_queue, object_bytes):
+    def upload_object(http_client, bucket, base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, object_bytes):
         binary_prefix = types_names_for_hash[object_type] + b' ' + str(object_length).encode() + b'\x00'
         sha = sha1(binary_prefix)
         temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
@@ -314,9 +314,11 @@ def mirror_repos(mappings,
         if not is_lfs():
             return
         lfs_sha256, lfs_size = lfs_pointer()
-        lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size))
+        with lfs_bar_lock:
+            lfs_bar.total = (lfs_bar.total or 0) + lfs_size
+        lfs_queue.put(partial(upload_lfs, s3_client, http_client, bucket, target_prefix, base_url, lfs_bar, lfs_sha256, lfs_size))
 
-    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, lfs_queue, base_sha, delta_bytes):
+    def construct_object_from_delta_and_upload(s3_client, bucket, base_url, target_prefix, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, base_sha, delta_bytes):
         yield_indefinite, read_bytes, return_unused = get_reader(delta_bytes)
         base_size = get_length(read_bytes)
         target_size = get_length(read_bytes)
@@ -394,9 +396,9 @@ def mirror_repos(mappings,
         with sha_lock:
             object_type = shas[base_sha]
 
-        upload_object(http_client, bucket, base_url, target_prefix, object_type, target_size, sha_lock, sha_events, shas, lfs_queue, yield_object_bytes())
+        upload_object(http_client, bucket, base_url, target_prefix, object_type, target_size, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, yield_object_bytes())
 
-    def yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size):
+    def yield_lfs_data(http_client, bucket, base_url, lfs_bar, lfs_sha256, lfs_size):
         batch_response = http_client.post(base_url.removesuffix('.git') + '.git/info/lfs/objects/batch', json={
             'operation': 'download',
             'objects': [{'oid': lfs_sha256, 'size': lfs_size}]
@@ -405,9 +407,11 @@ def mirror_repos(mappings,
         download_href = batch_response.json()['objects'][0]['actions']['download']['href']
 
         with httpx.stream('GET', download_href) as bytes_response:
-            yield from bytes_response.iter_bytes()
+            for chunk in bytes_response.iter_bytes():
+                yield chunk
+                lfs_bar.update(len(chunk))
 
-    def upload_lfs(s3_client, http_client, bucket, target_prefix, base_url, lfs_sha256, lfs_size):
+    def upload_lfs(s3_client, http_client, bucket, target_prefix, base_url, lfs_bar, lfs_sha256, lfs_size):
         logger.debug('Uploading LFS %s %s', lfs_sha256, lfs_size)
         key = f'{target_prefix}/lfs/objects/' + lfs_sha256[0:2] + '/' + lfs_sha256[2:4] + '/' + lfs_sha256
         try:
@@ -416,9 +420,10 @@ def mirror_repos(mappings,
             if e.response['Error']['Code'] != '404':
                 raise
         else:
+            lfs_bar.update(lfs_size)
             logger.debug('LFS exists, skipping %s', lfs_sha256)
             return
-        lfs_data = yield_lfs_data(http_client, bucket, base_url, lfs_sha256, lfs_size)
+        lfs_data = yield_lfs_data(http_client, bucket, base_url, lfs_bar, lfs_sha256, lfs_size)
         s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=key)
         logger.debug('Uploaded %s %s', lfs_sha256, lfs_size)
 
@@ -448,6 +453,33 @@ def mirror_repos(mappings,
         sha_lock = Lock()
         sha_events = defaultdict(Event)
         shas = {}
+
+        # tqdm by default shows total=0 as 0% done, but we want to only treat total=None as 0%,
+        # to only invoke the total=0 case when we know there are no lfs pointers
+        class TqdmZeroDone(tqdm):
+            @staticmethod
+            def format_meter(n, total, elapsed, rate, bar_format, unit, **extra_kwargs):
+                bar_format = '{desc:15} {percentage:3.0f}%|{bar}'
+                r_bar_format = '{r_bar:40}'
+
+                def parent(n, total, rate, bar_format):
+                    return super(TqdmZeroDone, TqdmZeroDone).format_meter(
+                        n, total, elapsed, bar_format=bar_format, unit=unit, **extra_kwargs,
+                    )
+
+                return \
+                    parent(0, 1, 1, bar_format + r_bar_format).replace('0/1', '0/0') if total is None else \
+                    parent(1, 1, 1, bar_format + f'| 0/0 [00:00<00:00, 0{unit}/s]               ') if total == 0 else \
+                    parent(n, total, rate, bar_format + r_bar_format)
+
+        def format_desc(desc, width=48):
+            return \
+                ((' ' * (width - len(desc))) + desc) if len(desc) < width else \
+                ('... ' + desc[max(len(desc) - width + 4, 0):])
+
+        object_bar = TqdmZeroDone(total=None, desc=format_desc(source_base_url + ' [obj]'), unit='obj', position=0)
+        lfs_bar = TqdmZeroDone(total=None, desc=format_desc(source_base_url + ' [lfs]'), unit='B', position=1, unit_scale=True)
+        lfs_bar_lock = Lock()
 
         try:
             parsed_target = urllib.parse.urlparse(target)
@@ -479,7 +511,9 @@ def mirror_repos(mappings,
 
                 number_of_objects, = unpack('>I', read_bytes(4))
 
-                for i in tqdm(range(0, number_of_objects), desc=source_base_url, unit='obj'):
+                for i in range(0, number_of_objects):
+                    object_bar.total = number_of_objects
+
                     object_type, object_length = get_object_type_and_length(read_bytes)
                     assert object_type in (1, 2, 3, 4, 7)  # 6 == OBJ_OFS_DELTA is unsupported for now
 
@@ -487,12 +521,13 @@ def mirror_repos(mappings,
                     object_bytes_queue = Queue(maxsize=1)
 
                     object_queue.put(
-                        partial(upload_object, http_client, bucket, source_base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_queue, object_bytes=queue_to_iterable(object_bytes_queue,)) if object_type in (1, 2, 3, 4) else \
-                        partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, lfs_queue, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue,))
+                        partial(upload_object, http_client, bucket, source_base_url, target_prefix, object_type, object_length, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, object_bytes=queue_to_iterable(object_bytes_queue,)) if object_type in (1, 2, 3, 4) else \
+                        partial(construct_object_from_delta_and_upload, s3_client, bucket, source_base_url, target_prefix, sha_lock, sha_events, shas, lfs_bar, lfs_bar_lock, lfs_queue, base_sha=read_bytes(20), delta_bytes=queue_to_iterable(object_bytes_queue,))
                     )
                     for chunk in uncompressed:
                         object_bytes_queue.put(chunk)
                     object_bytes_queue.put(done)
+                    object_bar.update(1)
 
                 trailer = read_bytes(20)
         finally:
@@ -504,11 +539,18 @@ def mirror_repos(mappings,
 
             # Ensure all LFS workers have finished
             logger.info('Regular objects uploaded. Waiting for LFS objects to be copied')
+
             for i in range(0, num_lfs_workers):
                 lfs_queue.put(done)
             for worker in lfs_workers:
                 worker.join()
             logger.info('LFS objects uploaded')
+
+            if not lfs_bar.total:
+                lfs_bar.reset(total=0)
+
+            object_bar.close()
+            lfs_bar.close()
 
         s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
         s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
