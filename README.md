@@ -67,6 +67,11 @@ At the time of writing, there is no known standard way of discovering a set of a
 The project requests a [git packfile](https://git-scm.com/book/en/v2/Git-Internals-Packfiles) with all objects from each source, separates it into its component [git objects](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects), and stores each separately in S3 as an S3 object.
 
 - The packfile is requested via a single POST request. Its response is stream-processed to avoid loading it all into memory at once.
+
 - An attempt is made to split processing of the response into separate threads where possible. Stream processing is somewhat at-odds with parallel processing, but there are still parts that can be moved to separate threads.
+
 - Where parallism is not possible, for example when a delta object in the packfile has to wait for its base object, a [threading.Event](https://docs.python.org/3/library/threading.html#event-objects) is used for the thread to wait.
+
+- Delta object processing is quite slow. A delta object is an object whose contents aren't given directly in the packfile, but rather as instructions based on the contents of another object. Each instruction can result in a request to S3, which has a high latency. Efforts are made to reduce the effects of this, such as fetching more data than needed each time and caching the results, but this can probably still be improved.
+
 - So far a deadlock has not been observed, but this depends on the packfile being returned in an order where base objects are always before the deltas that depend on them.
