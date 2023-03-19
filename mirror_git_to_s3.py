@@ -355,32 +355,34 @@ def mirror_repos(mappings,
                 size = read_sparse(instruction, range(4, 7)) or 65536
                 sha_hex = base_sha.hex()
 
+                # If the size is bigger than 64KiB, we don't cache and just stream
+                # - this is actually quite rare for source code
                 if size >= 65536:
-                    # If the size is bigger than 64KiB, we don't cache and just stream
-                    # - this is actually quite rare for source code
                     resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(offset, offset + size - 1))
                     target_size_remaining -= size
                     yield from yield_with_asserted_length(resp['Body'], size)
-                else:
-                    for i, (cache_start, cache) in enumerate(caches):
-                        if cache_start <= offset and offset + size < cache_start + len(cache):
-                            del caches[i]
-                            caches.appendleft((cache_start, cache))
-                            break
-                    else:
-                        middle = offset + (size // 2)
-                        cache_a_start = max(middle - 32768, 0)
-                        provisional_cache_end = cache_a_start + 65536
-                        resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(cache_a_start, provisional_cache_end - 1))
-                        cache_a = resp['Body'].read()
-                        cache_start = cache_a_start
-                        cache = cache_a
-                        caches.pop()
-                        caches.appendleft((cache_start, cache))
+                    continue
 
-                    target_size_remaining -= size
-                    assert len(cache[offset - cache_start:offset - cache_start + size]) == size
-                    yield cache[offset - cache_start:offset - cache_start + size]
+                # If the size is less than 64KiB, we fetch in 64KiB chunks and save in a LRU cache
+                for i, (cache_start, cache) in enumerate(caches):
+                    if cache_start <= offset and offset + size < cache_start + len(cache):
+                        del caches[i]
+                        caches.appendleft((cache_start, cache))
+                        break
+                else:
+                    middle = offset + (size // 2)
+                    cache_a_start = max(middle - 32768, 0)
+                    provisional_cache_end = cache_a_start + 65536
+                    resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Range='bytes={}-{}'.format(cache_a_start, provisional_cache_end - 1))
+                    cache_a = resp['Body'].read()
+                    cache_start = cache_a_start
+                    cache = cache_a
+                    caches.pop()
+                    caches.appendleft((cache_start, cache))
+
+                target_size_remaining -= size
+                assert len(cache[offset - cache_start:offset - cache_start + size]) == size
+                yield cache[offset - cache_start:offset - cache_start + size]
 
             # Not expecting any bytes - this is to exhaust the iterator to put back bytes after zlib
             for _ in delta_bytes:
