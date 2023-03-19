@@ -6,6 +6,7 @@ This project mirrors objects stored on Large File Storage (LFS). Note however LF
 
 At the time of writing repositories with many objects can be slow to mirror.
 
+https://user-images.githubusercontent.com/13877/226189635-8869c40c-ad15-4648-8f61-f44c7f18e46f.mov
 
 ## Installation
 
