@@ -1,4 +1,6 @@
-# mirror-git-to-s3 ![Build Status](https://github.com/uktrade/mirror-git-to-s3/actions/workflows/tests.yml/badge.svg?branch=main)
+# mirror-git-to-s3
+
+[![PyPI package](https://img.shields.io/pypi/v/mirror-git-to-s3?label=PyPI%20package&color=%234c1)](https://pypi.org/project/mirror-git-to-s3/) [![Test suite](https://img.shields.io/github/actions/workflow/status/uktrade/mirror-git-to-s3/test.yml?label=Test%20suite)](https://github.com/uktrade/mirror-git-to-s3/actions/workflows/tests.yml) [![Code coverage](https://img.shields.io/codecov/c/github/uktrade/mirror-git-to-s3?label=Code%20coverage)](https://app.codecov.io/gh/uktrade/mirror-git-to-s3)
 
 Python functions and CLI to mirror public git repositories available on HTTP(S) to S3. Essentially converts smart protocol git repositories to the so-called dumb protocol. Does not use temporary disk space, and uses streaming under the hood. This should allow the mirroring to be run on systems that don't have much disk or available memory, even on repositories with large objects.
 
