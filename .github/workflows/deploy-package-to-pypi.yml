@@ -30,7 +30,7 @@ jobs:
     needs: [build]
     environment:
       name: pypi
-      url: https://pypi.org/project/stream-zip/
+      url: https://pypi.org/project/mirror-git-to-s3/
 
     name: upload release to PyPI
     runs-on: ubuntu-latest
