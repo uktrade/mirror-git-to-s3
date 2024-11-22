@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 def mirror_repos(mappings,
         get_http_client=lambda: httpx.Client(transport=httpx.HTTPTransport(retries=3)),
         get_s3_client=lambda: boto3.client('s3'),
+        s3_storage_class="STANDARD",
         num_object_workers=10,
         num_lfs_workers=10,
         lfs_queue_size=10000,  # A queue item is small
@@ -284,22 +285,22 @@ def mirror_repos(mappings,
         if object_length < 65536:
             all_bytes = b''.join(with_lfs_check)
             sha_hex = sha.hexdigest()
-            s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Body=all_bytes)
+            s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', Body=all_bytes, StorageClass=s3_storage_class)
 
             with sha_lock:
                 shas[sha.digest()] = object_type
                 sha_events[sha.digest()].set()
 
             compressed_and_prefixed = b''.join(compress_zlib(itertools.chain((binary_prefix,), (all_bytes,))))
-            s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', Body=compressed_and_prefixed)
+            s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', Body=compressed_and_prefixed, StorageClass=s3_storage_class)
         else:
             temp_file_name =  f'{target_prefix}/mirror_tmp/{str(uuid.uuid4())}'
-            s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name)
+            s3_client.upload_fileobj(to_filelike_obj(with_lfs_check), Bucket=bucket, Key=temp_file_name, ExtraArgs={'StorageClass': s3_storage_class})
             sha_hex = sha.hexdigest()
             s3_client.copy(CopySource={
                 'Bucket': bucket,
                 'Key': temp_file_name,
-            }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
+            }, Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}', ExtraArgs={'StorageClass': s3_storage_class})
 
             with sha_lock:
                 shas[sha.digest()] = object_type
@@ -309,7 +310,7 @@ def mirror_repos(mappings,
 
             # Upload in prefixed and compressed format to final location
             resp = s3_client.get_object(Bucket=bucket, Key=f'{target_prefix}/mirror_tmp/raw/{sha_hex}')
-            s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}')
+            s3_client.upload_fileobj(to_filelike_obj(compress_zlib(itertools.chain((binary_prefix,), resp['Body']))), Bucket=bucket, Key=f'{target_prefix}/objects/{sha_hex[0:2]}/{sha_hex[2:]}', ExtraArgs={'StorageClass': s3_storage_class})
 
         object_bar.update(1)
 
@@ -426,7 +427,7 @@ def mirror_repos(mappings,
             logger.debug('LFS exists, skipping %s', lfs_sha256)
             return
         lfs_data = yield_lfs_data(http_client, bucket, base_url, lfs_bar, lfs_sha256, lfs_size)
-        s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=key)
+        s3_client.upload_fileobj(to_filelike_obj(lfs_data), Bucket=bucket, Key=key, ExtraArgs={'StorageClass': s3_storage_class})
         logger.debug('Uploaded %s %s', lfs_sha256, lfs_size)
 
     def worker_func(q):
@@ -553,8 +554,8 @@ def mirror_repos(mappings,
             object_bar.close()
             lfs_bar.close()
 
-        s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref)
-        s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs))
+        s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/HEAD', Body=b'ref: ' + head_ref, StorageClass=s3_storage_class)
+        s3_client.put_object(Bucket=bucket, Key=f'{target_prefix}/info/refs', Body=b''.join(sha[4:] + b'\t' + ref + b'\n' for sha, ref in refs), StorageClass=s3_storage_class)
  
         clear_tmp(s3_client, bucket, target_prefix)
 
